@@ -179,6 +179,27 @@ test("保留上游 CLI 时不会改写二进制", (t) => {
   );
 });
 
+test("macOS 26.1002 从 CodexCLI.app 保留 CLI，优先于旧路径", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-nested-cli-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const codexPath = path.join(directory, "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex");
+  fs.mkdirSync(path.dirname(codexPath), { recursive: true });
+  const original = Buffer.from("upstream-26.1002-cli");
+  fs.writeFileSync(codexPath, original);
+
+  for (const platform of ["mac-arm64", "mac-x64"]) {
+    assert.equal(keepUpstreamCodex(platform, directory, "codex"), codexPath);
+  }
+  assert.deepEqual(fs.readFileSync(codexPath), original);
+  assert.equal(fs.existsSync(path.join(directory, "codex")), false);
+
+  // 新版应用本身解析嵌套路径，遗留的平铺文件不能抢占它。
+  fs.writeFileSync(path.join(directory, "codex"), "stale-flat-cli");
+  assert.equal(keepUpstreamCodex("mac-arm64", directory, "codex"), codexPath);
+  assert.deepEqual(fs.readFileSync(codexPath), original);
+});
+
 test("直打包流程覆盖 ASAR 外的插件与 CUA 补丁", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-external-overlay-test-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

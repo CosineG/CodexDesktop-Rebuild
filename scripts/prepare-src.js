@@ -19,6 +19,7 @@ const fs = require("fs");
 const path = require("path");
 const { execSync, execFileSync } = require("child_process");
 const {
+  findUpstreamCodex,
   getCodexBinarySource,
   getCometixCodexPackageSpec,
 } = require("./codex-binary-policy");
@@ -238,12 +239,12 @@ function main() {
   const binarySource = getCodexBinarySource(platform);
   const vendorCodex = binarySource === "cometix" ? resolveCodexVendor(platform) : null;
   if (binarySource === "upstream") {
-    const upstreamCodex = path.join(sourceDir, codexBinName);
-    if (!fs.existsSync(upstreamCodex)) {
+    const upstreamCodex = findUpstreamCodex(platform, sourceDir, codexBinName);
+    if (!upstreamCodex) {
       console.error(`[x] Upstream ${codexBinName} not found for ${platform}`);
       process.exit(1);
     }
-    console.log(`   [codex] keeping upstream ${codexBinName}`);
+    console.log(`   [codex] keeping upstream ${path.relative(sourceDir, upstreamCodex)}`);
   } else if (vendorCodex) {
     // Linux 复用 macOS 应用资源，因此必须换成目标架构可执行文件。
     const dest = path.join(sourceDir, codexBinName);

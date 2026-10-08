@@ -15,7 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execSync, execFileSync } = require("child_process");
-const { getCodexBinarySource } = require("./codex-binary-policy");
+const { findUpstreamCodex, getCodexBinarySource } = require("./codex-binary-policy");
 const { validateWindowsPackage } = require("./sync-upstream");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -432,11 +432,11 @@ function keepUpstreamCodex(platform, resourcesDir, binName) {
   if (getCodexBinarySource(platform) !== "upstream") {
     throw new Error(`Direct upstream packaging cannot use a replacement CLI for ${platform}`);
   }
-  const codexPath = path.join(resourcesDir, binName);
-  if (!fs.existsSync(codexPath)) {
+  const codexPath = findUpstreamCodex(platform, resourcesDir, binName);
+  if (!codexPath) {
     throw new Error(`Upstream ${binName} not found for ${platform}`);
   }
-  console.log(`   [codex] keeping upstream ${binName}`);
+  console.log(`   [codex] keeping upstream ${path.relative(resourcesDir, codexPath)}`);
   return codexPath;
 }
 

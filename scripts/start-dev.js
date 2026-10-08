@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { findUpstreamCodex } = require('./codex-binary-policy');
 
 // Detect platform and architecture
 const platform = process.platform;
@@ -43,7 +44,7 @@ const srcPlatform = platform === 'darwin'
 
 const candidates = [
   // 1. Upstream CLI (from sync-upstream, matches app version)
-  path.join(__dirname, '..', 'src', srcPlatform, cliName),
+  findUpstreamCodex(srcPlatform, path.join(__dirname, '..', 'src', srcPlatform), cliName),
   // 2. @cometix/codex platform package (0.128+ uses separate packages)
   (() => {
     const pkgMap = {
