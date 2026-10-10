@@ -47,6 +47,8 @@ jobs:
           npm ci
       - run: |
           brew install --quiet sevenzip
+      - name: Test patch and build scripts on macOS
+        run: npm test
       - run: node scripts/sync-upstream.js --force --skip-win
       - name: Check upstream patch compatibility
         run: node scripts/patch-all.js mac-${{ matrix.arch }} --check --report patch-reports/mac-${{ matrix.arch }}-check

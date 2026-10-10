@@ -228,3 +228,34 @@ test("直打包流程覆盖 ASAR 外的插件与 CUA 补丁", (t) => {
   );
   assert.equal(fs.readFileSync(path.join(resourcesDir, "unrelated.txt"), "utf8"), "keep");
 });
+
+test("外置插件覆盖可替换上游只读配置并保留文件权限", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-readonly-overlay-test-"));
+  const platformDir = path.join(directory, "platform");
+  const resourcesDir = path.join(directory, "resources");
+  const relative = path.join("plugins", "openai-bundled", "plugins", "unified-computer-use", ".mcp.json");
+  const source = path.join(platformDir, relative);
+  const destination = path.join(resourcesDir, relative);
+  t.after(() => {
+    // Windows cannot remove files carrying the read-only attribute.
+    for (const file of [source, destination]) {
+      if (fs.existsSync(file)) fs.chmodSync(file, 0o644);
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const patched = JSON.stringify({ mcpServers: { browser: { command: "patched-runtime" } } });
+  fs.writeFileSync(source, patched);
+  fs.writeFileSync(destination, JSON.stringify({ mcpServers: {} }));
+  // macOS 26.1007.21159 arm64 ZIP marks this file as 0444; ditto keeps it.
+  fs.chmodSync(source, 0o444);
+  fs.chmodSync(destination, 0o444);
+  const originalMode = fs.statSync(destination).mode & 0o777;
+
+  assert.equal(overlayPatchedExternalResources(platformDir, resourcesDir), 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(destination, "utf8")), JSON.parse(patched));
+  assert.equal(fs.statSync(destination).mode & 0o777, originalMode);
+  assert.equal(fs.readFileSync(source, "utf8"), patched);
+  assert.equal(fs.statSync(source).mode & 0o200, 0);
+});

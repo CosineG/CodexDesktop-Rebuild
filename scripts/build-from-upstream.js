@@ -32,6 +32,26 @@ function clearDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+function copyResourceFile(src, dest) {
+  try {
+    fs.copyFileSync(src, dest);
+  } catch (error) {
+    if (!["EACCES", "EPERM"].includes(error.code)) throw error;
+    let target;
+    try { target = fs.lstatSync(dest); } catch { throw error; }
+    // ditto preserves read-only files from macOS app bundles. Only relax the
+    // output copy when it is a regular file without the owner's write bit.
+    if (!target.isFile() || (target.mode & 0o200) !== 0) throw error;
+    const originalMode = target.mode & 0o7777;
+    fs.chmodSync(dest, originalMode | 0o200);
+    try {
+      fs.copyFileSync(src, dest);
+    } finally {
+      fs.chmodSync(dest, originalMode);
+    }
+  }
+}
+
 function copyRecursive(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
   let count = 0;
@@ -43,7 +63,7 @@ function copyRecursive(src, dest) {
       try { fs.symlinkSync(target, d); } catch {}
       count++;
     } else {
-      fs.copyFileSync(s, d);
+      copyResourceFile(s, d);
       count++;
     }
   }
