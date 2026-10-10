@@ -24,6 +24,8 @@ function parseArgs(args) {
       options.check = true;
     } else if (arg === "--strict") {
       options.strict = true;
+    } else if (arg === "--no-ci-output") {
+      options.ciOutput = false;
     } else if (arg === "--report" || arg === "--source-dir") {
       const value = args[++index];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a path`);
@@ -102,7 +104,8 @@ function renderReport(report, { linkLogs = true } = {}) {
   const lines = [
     `# 上游补丁${report.mode === "check" ? "兼容检查" : "执行"}报告`,
     "",
-    `构建决策：${report.canBuild ? "可以继续" : "停止，必要补丁或输入检查失败"}。`,
+    `构建决策：${report.canBuild ? "可以继续" : "停止，补丁或输入检查失败"}。`,
+    ...(report.strict ? ["当前为严格模式：可选补丁失败也会阻止构建。"] : []),
     `执行失败：${failures} 项；可选补丁警告：${warnings} 项；待核对：${reviews} 项。`,
     "",
     "“待核对”不阻止当前构建，表示不能仅凭脚本成功确认对应功能已经修补。正常扫描和平台跳过提示属于信息，不算报错。",
@@ -140,14 +143,14 @@ function renderReport(report, { linkLogs = true } = {}) {
   return lines.join("\n");
 }
 
-function saveReport(report, reportDir) {
+function saveReport(report, reportDir, ciOutput) {
   const markdown = renderReport(report);
   if (reportDir) {
     fs.mkdirSync(reportDir, { recursive: true });
     fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report, null, 2) + "\n");
     fs.writeFileSync(path.join(reportDir, "report.md"), markdown);
   }
-  if (process.env.GITHUB_STEP_SUMMARY) {
+  if (ciOutput && process.env.GITHUB_STEP_SUMMARY) {
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, renderReport(report, { linkLogs: false }));
   }
 }
@@ -160,6 +163,7 @@ function runPatches({
   reportDir,
   policy = PATCH_POLICY,
   log = console.log,
+  ciOutput = false,
 } = {}) {
   sourceDir = path.resolve(sourceDir);
   const requested = platform === "unix" ? PLATFORMS.slice(0, 2) : platform ? [platform] : PLATFORMS;
@@ -225,7 +229,7 @@ function runPatches({
       if (result.status !== "passed") {
         const level = result.status === "warning" ? "warning" : "error";
         log(`[${level}] ${item}/${patch.script}: ${result.status === "warning" ? "keeping upstream implementation" : "build blocked"}`);
-        if (process.env.GITHUB_ACTIONS === "true") {
+        if (ciOutput && process.env.GITHUB_ACTIONS === "true") {
           log(`::${level} title=${patch.script}::${item}: ${patch.feature} ${result.status === "warning" ? "保留上游实现，详见兼容报告" : "失败，构建停止，详见兼容报告"}`);
         }
       }
@@ -236,13 +240,15 @@ function runPatches({
   report.reviewCount = report.results.filter((item) => resultOutcome(item) === "needs-review").length;
   log(`\n== Summary: ${report.results.filter((item) => item.status === "passed").length} passed, ${report.results.filter((item) => item.status === "warning").length} optional warnings, ${report.results.filter((item) => item.status === "failed").length} failures ==`);
   for (const error of report.errors) log(`[error] ${error}`);
-  saveReport(report, reportDir);
+  saveReport(report, reportDir, ciOutput);
   return report;
 }
 
 if (require.main === module) {
   try {
-    const report = runPatches(parseArgs(process.argv.slice(2)));
+    // Publishing to CI is an explicit CLI side effect. Library calls (including
+    // simulated failure tests) save local reports without polluting job summaries.
+    const report = runPatches({ ciOutput: true, ...parseArgs(process.argv.slice(2)) });
     if (!report.canBuild) process.exitCode = 1;
   } catch (error) {
     console.error(`[error] ${error.message}`);

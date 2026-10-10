@@ -114,6 +114,7 @@ test("CLI 缺少同步资源时返回失败并生成可读报告", (t) => {
   const reportDir = path.join(root, "report");
   const result = spawnSync(process.execPath, [
     path.join(__dirname, "patch-all.js"), "mac-arm64", "--check", "--source-dir", root, "--report", reportDir,
+    "--no-ci-output",
   ], { encoding: "utf8" });
 
   assert.equal(result.status, 1);
@@ -155,4 +156,41 @@ test("报告合并正常扫描提示，并把缺少目标与平台不适用分�
   const infoLines = markdown.split("\n").filter((line) => line.startsWith("- ") && line.includes("patch-plugin-auth.js"));
   assert.equal(infoLines.length, 1);
   assert.equal(renderReport(report, { linkLogs: false }).includes("]("), false);
+});
+
+test("CI 环境中的模拟失败测试不会写入真实 Actions Summary", (t) => {
+  const root = fixture(t);
+  const summary = path.join(root, "summary.md");
+  const original = "Actual build summary\n";
+  fs.writeFileSync(summary, original);
+  const childEnv = { ...process.env, GITHUB_ACTIONS: "true", GITHUB_STEP_SUMMARY: summary };
+  // Start a fresh test runner rather than inheriting the current worker's IPC mode.
+  delete childEnv.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, [
+    "--test", "--test-name-pattern=可选版权补丁失败时|CLI 缺少同步资源时",
+    path.join(__dirname, "patch-all.test.js"),
+  ], {
+    encoding: "utf8",
+    env: childEnv,
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /可选版权补丁失败时/);
+  assert.equal(fs.readFileSync(summary, "utf8"), original);
+});
+
+test("正式 CLI 仍把真实失败写入 Actions Summary", (t) => {
+  const root = fixture(t);
+  const summary = path.join(root, "summary.md");
+  const result = spawnSync(process.execPath, [
+    path.join(__dirname, "patch-all.js"), "mac-arm64", "--check", "--source-dir", root,
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_ACTIONS: "true", GITHUB_STEP_SUMMARY: summary },
+  });
+
+  assert.equal(result.status, 1);
+  const markdown = fs.readFileSync(summary, "utf8");
+  assert.match(markdown, /缺少 mac-arm64/);
+  assert.match(markdown, /构建决策：停止/);
 });

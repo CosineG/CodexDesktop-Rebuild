@@ -77,6 +77,8 @@ GitHub Actions automatically builds on:
 
 CI 在下载、提取实际上游资源后，先执行 `patch-all.js --check`，通过后再应用补丁和打包。检查与执行报告会写入 Actions 的 Summary；即使补丁失败，也会上传独立的 `Patch-Reports-*` artifact，其中包含 JSON、Markdown 和每个脚本的完整日志。
 
+Summary 只发布正式 CLI 的补丁执行结果；自动测试中的模拟失败仅保留在测试临时目录。程序调用 `runPatches()` 默认不写 CI Summary 或注释，测试调用 CLI 可使用 `--no-ci-output`。
+
 - 认证、运行时、配置传递和功能补丁为必要项，失败会阻止该平台构建和整体发布。
 - 版权署名和推理强度中文名称为可选项，失败会保留上游实现并报告警告；实际应用时会恢复该脚本改动前的目标文件，避免打包半完成的修改。
 - 补丁等级集中在 `scripts/patch-policy.js` 中；需要全部补丁成功时使用 `--strict`。
