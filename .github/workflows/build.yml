@@ -48,7 +48,19 @@ jobs:
       - run: |
           brew install --quiet sevenzip
       - run: node scripts/sync-upstream.js --force --skip-win
-      - run: node scripts/patch-all.js mac-${{ matrix.arch }}
+      - name: Check upstream patch compatibility
+        run: node scripts/patch-all.js mac-${{ matrix.arch }} --check --report patch-reports/mac-${{ matrix.arch }}-check
+
+      - name: Patch
+        run: node scripts/patch-all.js mac-${{ matrix.arch }} --report patch-reports/mac-${{ matrix.arch }}-apply
+
+      - name: Upload patch compatibility reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Patch-Reports-macOS-${{ matrix.arch }}
+          path: patch-reports/
+          if-no-files-found: ignore
       - run: npm run build:mac-${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:
@@ -75,7 +87,19 @@ jobs:
           Copy-Item "C:\Program Files\7-Zip\7z.exe" "C:\Program Files\7-Zip\7zz.exe"
           echo "C:\Program Files\7-Zip" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - run: node scripts/sync-upstream.js --force --skip-mac
-      - run: node scripts/patch-all.js win
+      - name: Check upstream patch compatibility
+        run: node scripts/patch-all.js win --check --report patch-reports/windows-x64-check
+
+      - name: Patch
+        run: node scripts/patch-all.js win --report patch-reports/windows-x64-apply
+
+      - name: Upload patch compatibility reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Patch-Reports-Windows-x64
+          path: patch-reports/
+          if-no-files-found: ignore
       - run: npm run build:win-x64
       - uses: actions/upload-artifact@v7
         with:
@@ -110,7 +134,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rpm fakeroot dpkg 7zip unzip
       - run: node scripts/sync-upstream.js --force --skip-win
-      - run: node scripts/patch-all.js mac-${{ matrix.arch }}
+      - name: Check upstream patch compatibility
+        run: node scripts/patch-all.js mac-${{ matrix.arch }} --check --report patch-reports/linux-${{ matrix.arch }}-check
+
+      - name: Patch
+        run: node scripts/patch-all.js mac-${{ matrix.arch }} --report patch-reports/linux-${{ matrix.arch }}-apply
+
+      - name: Upload patch compatibility reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Patch-Reports-Linux-${{ matrix.arch }}
+          path: patch-reports/
+          if-no-files-found: ignore
       - run: npm run build:linux-${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:

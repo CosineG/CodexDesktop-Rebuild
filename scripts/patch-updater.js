@@ -96,6 +96,7 @@ function locateTargets(platform) {
 
 function main() {
   const args = process.argv.slice(2);
+  const isCheck = args.includes("--check");
   const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
   const targets = locateTargets(platform);
@@ -112,6 +113,11 @@ function main() {
 
     if (patches.length === 0) {
       console.log("    [ok] Already patched or no match");
+      continue;
+    }
+
+    if (isCheck) {
+      console.log(`    [?] Would disable ${patches.length} updater methods`);
       continue;
     }
 

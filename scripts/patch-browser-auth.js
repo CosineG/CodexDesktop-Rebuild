@@ -9,6 +9,8 @@
  *
  * 这里保留 ChatGPT 登录下的原有身份与 Statsig 流程；仅当该流程失败时，
  * 将 request-header 能力降级为关闭，恢复旧版可继续建立本地浏览器通道的行为。
+ * 26.1007 将读取改为调用通用 feature-gate 函数；仅包装 request-header
+ * 回调，不改变其他 feature gate 的身份要求或超时逻辑。
  * 不会把 API key 当作 ChatGPT token 发送到 chatgpt.com。
  */
 const fs = require("fs");
@@ -18,6 +20,7 @@ const { SRC_DIR, relPath } = require("./patch-util");
 
 const IDENTITY_ERROR =
   "Browser request-header policy requires caller identity.";
+const FEATURE_GATE_IDENTITY_ERROR = "Browser feature gates require caller identity.";
 const REQUEST_HEADER_GATE = "codex_browser_use_agent_request_header";
 
 function walk(node, visitor) {
@@ -99,6 +102,37 @@ function findRequestHeaderAuthPatches(ast, source) {
   return patches;
 }
 
+function findInlineRequestHeaderAuthPatches(ast, source) {
+  const gateReaders = new Set();
+  walk(ast, (node) => {
+    if (node.type !== "FunctionDeclaration" || !node.async || !node.id) return;
+    if (source.slice(node.start, node.end).includes(FEATURE_GATE_IDENTITY_ERROR)) {
+      gateReaders.add(node.id.name);
+    }
+  });
+
+  const patches = [];
+  walk(ast, (node) => {
+    if (node.type !== "ArrowFunctionExpression" || node.params.length !== 0) return;
+    const call = node.body;
+    if (call.type !== "CallExpression" || call.callee.type !== "Identifier") return;
+    if (!gateReaders.has(call.callee.name)) return;
+    if (call.arguments[0]?.type !== "Literal") return;
+    if (call.arguments[0].value !== REQUEST_HEADER_GATE) return;
+
+    const expression = source.slice(call.start, call.end);
+    const arrow = source.slice(node.start, call.start);
+    patches.push({
+      id: "browser_request_header_auth_fallback",
+      start: node.start,
+      end: node.end,
+      replacement: `${node.async ? "" : "async "}${arrow}{try{return await ${expression}}catch{return!1}}`,
+      original: source.slice(node.start, node.end),
+    });
+  });
+  return patches;
+}
+
 function hasPatchedFallback(ast, source) {
   let found = false;
   walk(ast, (node) => {
@@ -127,7 +161,10 @@ function patchSource(source) {
   }
 
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
-  const patches = findRequestHeaderAuthPatches(ast, source);
+  const patches = [
+    ...findRequestHeaderAuthPatches(ast, source),
+    ...findInlineRequestHeaderAuthPatches(ast, source),
+  ];
   if (patches.length === 0) {
     return {
       status: hasPatchedFallback(ast, source)

@@ -5,7 +5,9 @@
 const fs = require("fs");
 const path = require("path");
 
-const SRC_DIR = path.join(__dirname, "..", "src");
+const SRC_DIR = process.env.CODEX_PATCH_SOURCE_DIR
+  ? path.resolve(process.env.CODEX_PATCH_SOURCE_DIR)
+  : path.join(__dirname, "..", "src");
 const PROJECT_ROOT = path.join(__dirname, "..");
 
 /**

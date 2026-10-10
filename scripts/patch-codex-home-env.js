@@ -10,16 +10,16 @@
  */
 const fs = require("fs");
 const path = require("path");
+const { SRC_DIR } = require("./patch-util");
 
 const args = process.argv.slice(2);
 const check = args.includes("--check");
 const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
-const repoRoot = path.resolve(__dirname, "..");
 const targets = platform
   ? [platform]
   : ["mac-arm64", "mac-x64", "win"].filter((p) =>
-      fs.existsSync(path.join(repoRoot, "src", p, "_asar", ".vite", "build")),
+      fs.existsSync(path.join(SRC_DIR, p, "_asar", ".vite", "build")),
     );
 
 const LEGACY_OLD = "let j=r.E({moduleDir:__dirname});await Yp(j.codexHome)";
@@ -97,7 +97,7 @@ function patchFile(file) {
 function main() {
   let changed = 0;
   for (const target of targets) {
-    const buildDir = path.join(repoRoot, "src", target, "_asar", ".vite", "build");
+    const buildDir = path.join(SRC_DIR, target, "_asar", ".vite", "build");
     const files = fs
       .readdirSync(buildDir)
       .filter((name) => name.endsWith(".js"))

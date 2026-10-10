@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Test Windows package selection
+      - name: Test patch and build scripts
         run: npm test
 
       - name: Check upstream versions
@@ -111,8 +111,19 @@ jobs:
       - name: Sync upstream (macOS only)
         run: node scripts/sync-upstream.js --force --skip-win
 
+      - name: Check upstream patch compatibility
+        run: node scripts/patch-all.js mac-${{ matrix.arch }} --check --report patch-reports/mac-${{ matrix.arch }}-check
+
       - name: Patch
-        run: node scripts/patch-all.js mac-${{ matrix.arch }}
+        run: node scripts/patch-all.js mac-${{ matrix.arch }} --report patch-reports/mac-${{ matrix.arch }}-apply
+
+      - name: Upload patch compatibility reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Patch-Reports-macOS-${{ matrix.arch }}
+          path: patch-reports/
+          if-no-files-found: ignore
 
       - name: Build
         run: npm run build:mac-${{ matrix.arch }}
@@ -154,8 +165,19 @@ jobs:
       - name: Sync upstream (Windows only)
         run: node scripts/sync-upstream.js --force --skip-mac
 
+      - name: Check upstream patch compatibility
+        run: node scripts/patch-all.js win --check --report patch-reports/windows-x64-check
+
       - name: Patch
-        run: node scripts/patch-all.js win
+        run: node scripts/patch-all.js win --report patch-reports/windows-x64-apply
+
+      - name: Upload patch compatibility reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Patch-Reports-Windows-x64
+          path: patch-reports/
+          if-no-files-found: ignore
 
       - name: Build
         run: npm run build:win-x64
@@ -206,8 +228,19 @@ jobs:
       - name: Sync upstream (macOS ZIP for unix, skip Windows)
         run: node scripts/sync-upstream.js --force --skip-win
 
+      - name: Check upstream patch compatibility
+        run: node scripts/patch-all.js mac-${{ matrix.arch }} --check --report patch-reports/linux-${{ matrix.arch }}-check
+
       - name: Patch
-        run: node scripts/patch-all.js mac-${{ matrix.arch }}
+        run: node scripts/patch-all.js mac-${{ matrix.arch }} --report patch-reports/linux-${{ matrix.arch }}-apply
+
+      - name: Upload patch compatibility reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Patch-Reports-Linux-${{ matrix.arch }}
+          path: patch-reports/
+          if-no-files-found: ignore
 
       - name: Build
         run: npm run build:linux-${{ matrix.arch }}
@@ -334,6 +367,8 @@ jobs:
             | macOS x64 | `${{ steps.version.outputs.mac_x64 || 'N/A' }}` |
             | Windows x64 | `${{ steps.version.outputs.win_version || 'N/A' }}` |
             | Linux | uses macOS ASAR |
+
+            Patch compatibility reports and optional-patch warnings are available in the [Actions run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) Summary and `Patch-Reports-*` artifacts.
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.zip

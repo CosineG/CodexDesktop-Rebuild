@@ -73,6 +73,27 @@ GitHub Actions automatically builds on:
 - Push to `master` / `main` and tag `v*` → build artifacts
 - 每日上游同步工作流：逐平台比较已保存的版本；仅在任一平台版本变化时下载上游、重新应用补丁、构建并更新 Release
 
+### 上游补丁兼容检查
+
+CI 在下载、提取实际上游资源后，先执行 `patch-all.js --check`，通过后再应用补丁和打包。检查与执行报告会写入 Actions 的 Summary；即使补丁失败，也会上传独立的 `Patch-Reports-*` artifact，其中包含 JSON、Markdown 和每个脚本的完整日志。
+
+- 认证、运行时、配置传递和功能补丁为必要项，失败会阻止该平台构建和整体发布。
+- 版权署名和推理强度中文名称为可选项，失败会保留上游实现并报告警告；实际应用时会恢复该脚本改动前的目标文件，避免打包半完成的修改。
+- 补丁等级集中在 `scripts/patch-policy.js` 中；需要全部补丁成功时使用 `--strict`。
+- 检查通过表示脚本能处理这份资源，不代表应用运行、登录或浏览器交互已被验证；已有脚本的无匹配或跳过提示仍需查看日志。
+
+```bash
+# 先同步上游，再检查兼容性；检查模式不修改资源
+node scripts/patch-all.js mac-arm64 --check --report patch-reports/mac-arm64-check
+
+# 应用补丁，再构建
+node scripts/patch-all.js mac-arm64 --report patch-reports/mac-arm64-apply
+npm run build:mac-arm64
+
+# 调试历史或单独解压的资源，可指定 src 根目录
+node scripts/patch-all.js win --check --source-dir /path/to/extracted/src --report patch-reports/win-check
+```
+
 ## Credits
 
 **© OpenAI · Cometix Space**

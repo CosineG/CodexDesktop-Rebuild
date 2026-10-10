@@ -8,6 +8,7 @@ node_modules/
 out/
 out-*/
 dist/
+patch-reports/
 
 # Upstream ASAR extracts and build-time copies (all generated)
 src/
