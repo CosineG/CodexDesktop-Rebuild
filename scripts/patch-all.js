@@ -58,27 +58,84 @@ function markdownCell(value) {
   return String(value).replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
 }
 
-function renderReport(report) {
-  const statuses = { passed: "脚本通过", warning: "保留上游实现", failed: "阻止构建" };
+function summarizeNotices(notices = []) {
+  const counts = new Map();
+  for (const notice of notices) {
+    const message = notice.trim();
+    if (message) counts.set(message, (counts.get(message) || 0) + 1);
+  }
+  return [...counts].map(([message, count]) => {
+    const notApplicable = /\[skip\].*not applicable/i.test(message);
+    const scanInfo = /^\[ok\] Already patched or no (?:AST )?match$/i.test(message);
+    return {
+      kind: notApplicable || scanInfo ? "info" : "review",
+      message,
+      count,
+      explanation: notApplicable
+        ? "该补丁不适用于此平台，正常跳过。"
+        : scanInfo
+          ? "扫描中部分文件没有待修改的位置（已修改或未命中）；这条提示不是执行失败。"
+          : "脚本未报执行失败，但这项提示需要核对；未找到目标时不能确认该功能已经修补。",
+    };
+  });
+}
+
+function resultOutcome(item) {
+  if (item.status !== "passed") return item.status;
+  const notices = item.noticeSummary || summarizeNotices(item.notices);
+  if (notices.some((notice) => notice.kind === "review")) return "needs-review";
+  if (notices.some((notice) => /not applicable/i.test(notice.message))) return "not-applicable";
+  return "passed";
+}
+
+function renderReport(report, { linkLogs = true } = {}) {
+  const statuses = {
+    passed: "脚本完成",
+    warning: "可选补丁失败，保留上游实现",
+    failed: "失败，阻止构建",
+    "needs-review": "待核对（脚本完成）",
+    "not-applicable": "不适用，正常跳过",
+  };
+  const failures = report.results.filter((item) => item.status === "failed").length + report.errors.length;
+  const warnings = report.results.filter((item) => item.status === "warning").length;
+  const reviews = report.results.filter((item) => resultOutcome(item) === "needs-review").length;
   const lines = [
     `# 上游补丁${report.mode === "check" ? "兼容检查" : "执行"}报告`,
     "",
     `构建决策：${report.canBuild ? "可以继续" : "停止，必要补丁或输入检查失败"}。`,
+    `执行失败：${failures} 项；可选补丁警告：${warnings} 项；待核对：${reviews} 项。`,
+    "",
+    "“待核对”不阻止当前构建，表示不能仅凭脚本成功确认对应功能已经修补。正常扫描和平台跳过提示属于信息，不算报错。",
     "",
     ...Object.entries(report.upstream).map(([platform, info]) => `- ${platform}: ${info.version} (build ${info.build || "unknown"})`),
     "",
     "| 平台 | 补丁 | 功能 | 等级 | 结果 |",
     "|---|---|---|---|---|",
     ...report.results.map((item) =>
-      `| ${markdownCell(item.platform)} | ${markdownCell(item.script)} | ${markdownCell(item.feature)} | ${item.required ? "必要" : "可选"} | ${statuses[item.status]}${item.notices?.length ? "（有匹配或跳过提示）" : ""} |`,
+      `| ${markdownCell(item.platform)} | ${markdownCell(item.script)} | ${markdownCell(item.feature)} | ${item.required ? "必要" : "可选"} | ${statuses[resultOutcome(item)]} |`,
     ),
   ];
   if (report.errors.length > 0) lines.push("", ...report.errors.map((error) => `- ${error}`));
-  for (const item of report.results.filter((result) => result.status !== "passed" || result.notices?.length)) {
-    lines.push("", `## ${item.platform} / ${item.script}`, "", item.diagnostic);
-    if (item.notices?.length) lines.push("", ...item.notices.map((notice) => `- ${notice}`));
-    if (item.logFile) lines.push("", `完整日志：[${item.logFile}](${item.logFile})`);
+  const normalInfo = report.results.filter((item) => item.status === "passed")
+    .flatMap((item) => (item.noticeSummary || summarizeNotices(item.notices))
+      .filter((notice) => notice.kind === "info")
+      .map((notice) => ({ ...notice, platform: item.platform, script: item.script })));
+  if (normalInfo.length > 0) {
+    lines.push("", "## 正常信息", "");
+    for (const notice of normalInfo) {
+      lines.push(`- ${notice.platform} / ${notice.script}：${notice.explanation}${notice.count > 1 ? `（合并 ${notice.count} 条相同提示）` : ""}`);
+    }
   }
+  for (const item of report.results.filter((result) => result.status !== "passed" || result.notices?.length)) {
+    const notices = item.noticeSummary || summarizeNotices(item.notices);
+    if (item.status === "passed" && !notices.some((notice) => notice.kind === "review")) continue;
+    lines.push("", `## ${item.platform} / ${item.script}`, "", item.diagnostic);
+    for (const notice of notices.filter((entry) => entry.kind === "review")) {
+      lines.push("", notice.explanation, "", `- ${markdownCell(notice.message)}${notice.count > 1 ? `（${notice.count} 次）` : ""}`);
+    }
+    if (linkLogs && item.logFile) lines.push("", `完整日志：[${item.logFile}](${item.logFile})`);
+  }
+  if (!linkLogs) lines.push("", "完整 JSON 报告和原始日志见本次运行的 `Patch-Reports-*` artifact。");
   lines.push("", "该报告验证补丁脚本能否处理实际提取的上游资源，不代表应用运行、登录或浏览器交互已通过验证。", "");
   return lines.join("\n");
 }
@@ -90,7 +147,9 @@ function saveReport(report, reportDir) {
     fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report, null, 2) + "\n");
     fs.writeFileSync(path.join(reportDir, "report.md"), markdown);
   }
-  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, renderReport(report, { linkLogs: false }));
+  }
 }
 
 function runPatches({
@@ -144,6 +203,7 @@ function runPatches({
         result.notices = output.split(/\r?\n/).filter((line) =>
           /\[skip\]|\[!\]|no match|not found|no .*targets? found|no .*bundles? found/i.test(line),
         );
+        result.noticeSummary = summarizeNotices(result.notices);
         result.status = failed ? (required || strict ? "failed" : "warning") : "passed";
         result.diagnostic = failed ? (findings.join("\n") || output).slice(-8000) || "补丁进程未正常完成。" : "补丁脚本已完成。";
         if (reportDir) {
@@ -173,6 +233,7 @@ function runPatches({
     }
   }
   report.canBuild = report.errors.length === 0 && !report.results.some((item) => item.status === "failed");
+  report.reviewCount = report.results.filter((item) => resultOutcome(item) === "needs-review").length;
   log(`\n== Summary: ${report.results.filter((item) => item.status === "passed").length} passed, ${report.results.filter((item) => item.status === "warning").length} optional warnings, ${report.results.filter((item) => item.status === "failed").length} failures ==`);
   for (const error of report.errors) log(`[error] ${error}`);
   saveReport(report, reportDir);

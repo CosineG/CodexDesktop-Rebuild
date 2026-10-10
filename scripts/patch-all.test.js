@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { runPatches } = require("./patch-all");
+const { runPatches, renderReport } = require("./patch-all");
 const { PATCH_POLICY } = require("./patch-policy");
 
 function fixture(t) {
@@ -120,4 +120,39 @@ test("CLI 缺少同步资源时返回失败并生成可读报告", (t) => {
   const report = JSON.parse(fs.readFileSync(path.join(reportDir, "report.json")));
   assert.equal(report.canBuild, false);
   assert.match(report.errors[0], /mac-arm64/);
+});
+
+test("报告合并正常扫描提示，并把缺少目标与平台不适用分开", (t) => {
+  const root = fixture(t);
+  const asar = path.join(root, "mac-arm64", "_asar");
+  const assets = path.join(asar, "webview", "assets");
+  fs.mkdirSync(assets, { recursive: true });
+  fs.writeFileSync(path.join(asar, "package.json"), JSON.stringify({ version: "26.1007.21159" }));
+  // These chunks are scanned for auth but contain no patchable auth function.
+  for (const file of ["auth-a.js", "auth-b.js"]) {
+    fs.writeFileSync(path.join(assets, file), "const authMethod='chatgpt';const allowed=authMethod!=='chatgpt';");
+  }
+  const reportDir = path.join(root, "report");
+  const report = runPatches({
+    platform: "mac-arm64", sourceDir: root, check: true, reportDir,
+    policy: policy("patch-windows-portable-runtime.js", "patch-model-picker-submenu.js", "patch-plugin-auth.js"),
+    log: () => {},
+  });
+
+  assert.equal(report.canBuild, true);
+  assert.equal(report.reviewCount, 1);
+  const scanner = report.results.find((item) => item.script === "patch-plugin-auth.js");
+  assert.equal(scanner.noticeSummary.length, 1);
+  assert.equal(scanner.noticeSummary[0].kind, "info");
+  assert.equal(scanner.noticeSummary[0].count, 2);
+  assert.equal(report.results.find((item) => item.script === "patch-windows-portable-runtime.js").noticeSummary[0].kind, "info");
+  assert.equal(report.results.find((item) => item.script === "patch-model-picker-submenu.js").noticeSummary[0].kind, "review");
+
+  const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
+  // The table must not claim a missing submenu patch was applied.
+  const submenuRow = markdown.split("\n").find((line) => line.startsWith("|") && line.includes("patch-model-picker-submenu.js"));
+  assert.match(submenuRow, /待核对/);
+  const infoLines = markdown.split("\n").filter((line) => line.startsWith("- ") && line.includes("patch-plugin-auth.js"));
+  assert.equal(infoLines.length, 1);
+  assert.equal(renderReport(report, { linkLogs: false }).includes("]("), false);
 });
