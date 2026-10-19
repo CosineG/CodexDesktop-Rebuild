@@ -73,6 +73,21 @@ GitHub Actions automatically builds on:
 - Push to `master` / `main` and tag `v*` → build artifacts
 - 每日上游同步工作流：逐平台比较已保存的版本；仅在任一平台版本变化时下载上游、重新应用补丁、构建并更新 Release
 
+### Linux CLI runtime
+
+Linux builds accept both the legacy `@cometix/codex` vendor layout and the
+manifest-based package layout (`bin/`, `codex-path/`, `codex-resources/`,
+`codex-package.json`). The complete runtime is staged separately from macOS
+resources; relative launcher links preserve native package discovery. Missing
+CLI, code-mode host or ripgrep binaries, or a wrong ELF architecture, stop the
+build rather than falling back to macOS binaries.
+
+CI uses native Ubuntu 24.04 x64/arm64 runners. After packaging,
+`scripts/verify-linux-build.js` starts the packaged CLI, app-server help,
+code-mode host and ripgrep. These smoke checks verify executable startup, not
+desktop UI, login or a complete browser session. The selected CLI version and
+package layout are recorded in the build log; dist-tags remain dynamic.
+
 ### 上游补丁兼容检查
 
 CI 在下载、提取实际上游资源后，先执行 `patch-all.js --check`，通过后再应用补丁和打包。检查与执行报告会写入 Actions 的 Summary；即使补丁失败，也会上传独立的 `Patch-Reports-*` artifact，其中包含 JSON、Markdown 和每个脚本的完整日志。

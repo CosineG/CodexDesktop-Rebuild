@@ -111,11 +111,15 @@ jobs:
 
   build-linux:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'linux' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
       - name: Free disk space
@@ -135,6 +139,8 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y rpm fakeroot dpkg 7zip unzip
+      - name: Test patch and build scripts on Linux
+        run: npm test
       - run: node scripts/sync-upstream.js --force --skip-win
       - name: Check upstream patch compatibility
         run: node scripts/patch-all.js mac-${{ matrix.arch }} --check --report patch-reports/linux-${{ matrix.arch }}-check

@@ -1,6 +1,7 @@
 const { FuseV1Options, FuseVersion } = require("@electron/fuses");
 const path = require("path");
 const fs = require("fs");
+const { assertPackagedLinuxRuntime, copyRuntimeTree } = require("./scripts/linux-codex-runtime");
 
 const githubRepository = process.env.GITHUB_REPOSITORY || "";
 const githubRefName = process.env.GITHUB_REF_NAME || "master";
@@ -125,6 +126,7 @@ module.exports = {
 
       const platformDir = path.join(__dirname, "src", platformKey);
       if (!fs.existsSync(platformDir)) {
+        if (isLinux) throw new Error(`Linux application resources not staged: ${platformDir}`);
         console.log(`   [!] src/${platformKey}/ not found`);
         return;
       }
@@ -133,12 +135,15 @@ module.exports = {
       // For Linux: also skip macOS-only binaries and app.asar (forge packs its own).
       const skip = new Set(["_asar"]);
       const MACOS_ONLY_FILES = new Set([
-        "node", "node_repl",
+        "node", "node_repl", "codex", "codex-code-mode-host", "rg", "codex_chronicle",
+        "codex-package.json",
         "electron.icns", "Assets.car",
         "codexTemplate.png", "codexTemplate@2x.png",
         "app.asar", "codex-notification.wav",
       ]);
-      const MACOS_ONLY_DIRS = new Set(["native", "app.asar.unpacked"]);
+      const MACOS_ONLY_DIRS = new Set([
+        "native", "app.asar.unpacked", "codex-cli", "codex-resources", "codex-path", "bin",
+      ]);
       if (isLinux) {
         for (const f of MACOS_ONLY_FILES) skip.add(f);
         for (const d of MACOS_ONLY_DIRS) skip.add(d);
@@ -185,6 +190,14 @@ module.exports = {
           try { fs.chmodSync(destPath, 0o755); } catch {}
           copied++;
         }
+      }
+
+      if (isLinux) {
+        const runtimeDir = path.join(__dirname, "src", `linux-${arch}`, "codex-runtime");
+        if (!fs.existsSync(runtimeDir)) throw new Error(`Linux Codex runtime not staged: ${runtimeDir}`);
+        copyRuntimeTree(runtimeDir, resourcesPath);
+        assertPackagedLinuxRuntime(resourcesPath, `linux-${arch}`);
+        console.log(`   [ok] Linux Codex package, helper resources and launcher links copied for ${arch}`);
       }
 
       console.log(`   [ok] ${copied} files (app.asar + unpacked + resources)`);

@@ -23,6 +23,7 @@ const {
   getCodexBinarySource,
   getCometixCodexPackageSpec,
 } = require("./codex-binary-policy");
+const { stageLinuxRuntime } = require("./linux-codex-runtime");
 
 const SRC = path.join(__dirname, "..", "src");
 const PROJECT_ROOT = path.join(__dirname, "..");
@@ -34,14 +35,6 @@ const TARGET_TRIPLE_MAP = {
   "linux-arm64": "aarch64-unknown-linux-musl",
   "win": "x86_64-pc-windows-msvc",
 };
-
-// macOS-only resources to strip for Linux
-const MACOS_STRIP = new Set([
-  "codex_chronicle", "node", "node_repl",
-  "electron.icns", "Assets.car",
-  "codexTemplate.png", "codexTemplate@2x.png",
-]);
-const MACOS_STRIP_DIRS = new Set(["native"]);
 
 function asarCliPath() {
   return path.join(PROJECT_ROOT, "node_modules", "@electron", "asar", "bin", "asar.mjs");
@@ -147,42 +140,27 @@ function ensureVendorExtracted(platform) {
   }
 
   console.log(`   [vendor] fetching ${spec} via npm pack...`);
-  const tmpDir = path.join(require("os").tmpdir(), "cometix-codex-pack");
-  fs.mkdirSync(tmpDir, { recursive: true });
+  const tmpDir = fs.mkdtempSync(path.join(require("os").tmpdir(), `cometix-codex-${platform}-`));
 
   try {
-    const tgzName = execSync(`npm pack ${spec} --pack-destination "${tmpDir}"`, {
+    const packed = JSON.parse(execSync(`npm pack ${spec} --json --pack-destination "${tmpDir}"`, {
       cwd: tmpDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-    }).trim().split("\n").pop();
+    }));
+    const tgzName = packed[0]?.filename;
+    if (!tgzName || path.basename(tgzName) !== tgzName) throw new Error("npm pack returned no valid archive filename");
 
     const extractDir = path.join(tmpDir, "extracted");
-    if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true });
     fs.mkdirSync(extractDir, { recursive: true });
-    execSync(`tar xzf "${path.join(tmpDir, tgzName)}" -C "${extractDir}"`, { stdio: "pipe" });
+    execFileSync("tar", ["xzf", path.join(tmpDir, tgzName), "-C", extractDir], { stdio: "pipe" });
 
     const vendorRoot = path.join(extractDir, "package", "vendor", triple);
     if (fs.existsSync(vendorRoot)) { _vendorRootCache = vendorRoot; return vendorRoot; }
+    throw new Error(`Archive does not contain vendor/${triple}`);
   } catch (e) {
     console.log(`   [!] npm pack failed: ${e.message}`);
   }
 
   return null;
-}
-
-function resolveCodexVendor(platform) {
-  const vendorRoot = ensureVendorExtracted(platform);
-  if (!vendorRoot) return null;
-  const binName = platform === "win" ? "codex.exe" : "codex";
-  const p = path.join(vendorRoot, "codex", binName);
-  return fs.existsSync(p) ? p : null;
-}
-
-function resolveRgVendor(platform) {
-  const vendorRoot = ensureVendorExtracted(platform);
-  if (!vendorRoot) return null;
-  const binName = platform === "win" ? "rg.exe" : "rg";
-  const p = path.join(vendorRoot, "path", binName);
-  return fs.existsSync(p) ? p : null;
 }
 
 function main() {
@@ -237,7 +215,6 @@ function main() {
   const isWin = platform === "win";
   const codexBinName = isWin ? "codex.exe" : "codex";
   const binarySource = getCodexBinarySource(platform);
-  const vendorCodex = binarySource === "cometix" ? resolveCodexVendor(platform) : null;
   if (binarySource === "upstream") {
     const upstreamCodex = findUpstreamCodex(platform, sourceDir, codexBinName);
     if (!upstreamCodex) {
@@ -245,28 +222,15 @@ function main() {
       process.exit(1);
     }
     console.log(`   [codex] keeping upstream ${path.relative(sourceDir, upstreamCodex)}`);
-  } else if (vendorCodex) {
-    // Linux 复用 macOS 应用资源，因此必须换成目标架构可执行文件。
-    const dest = path.join(sourceDir, codexBinName);
-    fs.copyFileSync(vendorCodex, dest);
-    try { fs.chmodSync(dest, 0o755); } catch {}
-    console.log(`   [codex] replaced with @cometix/codex`);
   } else {
-    console.error(`[x] @cometix/codex vendor not found for ${platform}`);
-    process.exit(1);
-  }
-
-  // 2b. For Linux: replace rg with platform-native version from @cometix/codex
-  if (isLinux) {
-    const vendorRg = resolveRgVendor(platform);
-    if (vendorRg) {
-      const dest = path.join(sourceDir, "rg");
-      fs.copyFileSync(vendorRg, dest);
-      try { fs.chmodSync(dest, 0o755); } catch {}
-      console.log(`   [rg] replaced with Linux rg from @cometix/codex`);
-    } else {
-      console.log(`   [!] Linux rg not found in vendor, keeping upstream (will fail on Linux)`);
-    }
+    const vendorRoot = ensureVendorExtracted(platform);
+    if (!vendorRoot) throw new Error(`@cometix/codex vendor not found for ${platform}`);
+    const runtimeDir = path.resolve(SRC, platform, "codex-runtime");
+    if (!runtimeDir.startsWith(path.resolve(SRC) + path.sep)) throw new Error("Runtime staging path escapes src/");
+    if (fs.existsSync(runtimeDir)) fs.rmSync(runtimeDir, { recursive: true, force: true });
+    const runtime = stageLinuxRuntime(vendorRoot, runtimeDir, platform);
+    console.log(`   [codex] staged ${runtime.manifest ? `package layout ${runtime.manifest.layoutVersion}, CLI ${runtime.manifest.version}` : "legacy layout"} from ${vendorRoot}`);
+    console.log(`   [codex] Linux CLI, code-mode host and rg validated for ${platform}`);
   }
 
   // 3. For Linux: copy _asar/ content to flat src/ (forge packs ASAR from src/)
@@ -336,4 +300,9 @@ function main() {
   console.log(`   [ok] src/ ready for ${platform} build`);
 }
 
-main();
+if (require.main === module) {
+  try { main(); } catch (error) {
+    console.error(`[x] ${error.message}`);
+    process.exitCode = 1;
+  }
+}
