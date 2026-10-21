@@ -181,6 +181,17 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
 }
 
+function summarizeChecks(checks) {
+  const platforms = ["macOS-arm64", "macOS-x64", "Windows"];
+  const results = [];
+  const errors = {};
+  checks.forEach((check, index) => {
+    if (check.status === "fulfilled") results.push(check.value);
+    else errors[platforms[index]] = check.reason?.message || String(check.reason);
+  });
+  return { results, errors };
+}
+
 // ─── 主流程 ──────────────────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
@@ -191,7 +202,6 @@ async function main() {
   const versionFile = resolveVersionFile(args);
 
   const saved = loadVersions(versionFile);
-  const results = [];
 
   const checks = await Promise.allSettled([
     checkMacArm64Version(),
@@ -199,13 +209,10 @@ async function main() {
     checkWindowsVersion(),
   ]);
 
-  for (const r of checks) {
-    if (r.status === "fulfilled") {
-      const info = r.value;
-      results.push(info);
-    } else if (!quiet) {
-      console.error(`  [!] ${r.reason.message}`);
-    }
+  const { results, errors } = summarizeChecks(checks);
+  const hasErrors = Object.keys(errors).length > 0;
+  if (!quiet) {
+    for (const [platform, error] of Object.entries(errors)) console.error(`  [!] ${platform}: ${error}`);
   }
 
   const updates = findUpdates(results, saved);
@@ -216,6 +223,7 @@ async function main() {
       timestamp: new Date().toISOString(),
       hasUpdates: updates.length > 0,
       platforms: Object.fromEntries(results.map((r) => [r.platform, r])),
+      errors,
       previous: saved,
     };
     console.log(JSON.stringify(output, null, 2));
@@ -224,7 +232,7 @@ async function main() {
     const toShow = force ? results : updates;
 
     if (toShow.length === 0 && !force) {
-      if (!quiet) console.log("✅ 没有新版本。");
+      if (!quiet && !hasErrors) console.log("✅ 没有新版本。");
     } else {
       for (const info of toShow) {
         const isUpdate = updates.includes(info);
@@ -248,7 +256,7 @@ async function main() {
   }
 
   // 保存版本记录
-  if (doSave && results.length > 0) {
+  if (doSave && !hasErrors && results.length > 0) {
     const newSaved = { ...saved };
     for (const r of results) {
       newSaved[r.platform] = {
@@ -261,10 +269,11 @@ async function main() {
     if (!quiet) console.log(`💾 版本记录已保存到 ${versionFile}`);
   }
 
-  // 退出码: 0=有更新, 1=无更新（方便 CI 使用）
-  if (!force && updates.length === 0) process.exitCode = 1;
+  // 退出码: 0=有更新或强制成功，1=无更新，2=检测不完整；失败不能伪装为最新版。
+  if (hasErrors) process.exitCode = 2;
+  else if (!force && updates.length === 0) process.exitCode = 1;
 
-  return { results, updates };
+  return { results, updates, errors };
 }
 
 module.exports = {
@@ -273,6 +282,7 @@ module.exports = {
   checkWindowsVersion,
   findUpdates,
   resolveVersionFile,
+  summarizeChecks,
 };
 
 if (require.main === module) {

@@ -7,7 +7,9 @@
  *   X !== "chatgpt"  -> X !== "chatgpt" && X !== "apikey"
  *   X === "chatgpt"  -> X === "chatgpt" || X === "apikey"
  *
- * 目标：同时包含 "fast_mode" 与 "chatgpt" 的渲染进程代码块。
+ * 目标：fast_mode 权限函数、新版 readServiceTier 的账户回调，
+ * 以及界面侧返回 serviceTierAccess 的认证与加载状态判断。
+ * 必须匹配完整字段名，避免把 codex_fast_mode 首页提示中的产品类型当作认证。
  */
 const fs = require("fs");
 const path = require("path");
@@ -52,11 +54,32 @@ function isAlreadyExpandedToApiKey(parent, source) {
   return source.slice(parent.start, parent.end).includes("apikey");
 }
 
+function hasServiceTierAccessResult(node) {
+  let found = false;
+  walk(node, (child) => {
+    // 调用方也会解构同名字段，只接受权限函数实际构造的结果对象。
+    if (child.type !== "ObjectExpression") return;
+    const keys = child.properties
+      .filter((property) => property.type === "Property" && !property.computed)
+      .map((property) => property.key.name ?? property.key.value);
+    if (keys.includes("serviceTierAccess") && keys.includes("isLoading")) found = true;
+  });
+  return found;
+}
+
+function isFastModeFunction(source, node = null) {
+  return /\bfast_mode\b/.test(source) ||
+    (source.includes("readServiceTier") && source.includes("getAccount")) ||
+    (source.includes("serviceTierAccess") &&
+      source.includes("authMethod") && source.includes("isLoading") &&
+      (node == null || hasServiceTierAccessResult(node)));
+}
+
 function collectPatches(ast, source) {
   const patches = [];
 
   walk(ast, (node) => {
-    // 只在同时包含认证判断和 fast_mode 的函数内改写，避免误伤普通字符串比较。
+    // 覆盖后端读取和界面速度权限，避免误伤普通产品类型比较。
     const isFn =
       node.type === "FunctionDeclaration" ||
       node.type === "FunctionExpression" ||
@@ -64,7 +87,7 @@ function collectPatches(ast, source) {
     if (!isFn) return;
 
     const fnSrc = source.slice(node.start, node.end);
-    if (!fnSrc.includes("fast_mode") || !fnSrc.includes("chatgpt")) return;
+    if (!isFastModeFunction(fnSrc, node) || !fnSrc.includes("chatgpt")) return;
 
     walk(node, (child, parent) => {
       if (child.type !== "BinaryExpression") return;
@@ -84,7 +107,7 @@ function collectPatches(ast, source) {
           id: "fast_mode_auth_gate",
           start: child.start,
           end: child.end,
-          replacement: `${childSrc}&&${apiKeySide}!==\`apikey\``,
+          replacement: `(${childSrc}&&${apiKeySide}!==\`apikey\`)`,
           original: childSrc,
         });
         return;
@@ -103,7 +126,7 @@ function collectPatches(ast, source) {
           id: "fast_mode_api_auth_gate",
           start: child.start,
           end: child.end,
-          replacement: `${childSrc}||${apiKeySide}===\`apikey\``,
+          replacement: `(${childSrc}||${apiKeySide}===\`apikey\`)`,
           original: childSrc,
         });
       }
@@ -124,7 +147,7 @@ function hasPatchedFastModeGate(ast, source) {
     if (!isFn) return;
 
     const fnSource = source.slice(node.start, node.end);
-    if (!fnSource.includes("fast_mode") || !fnSource.includes("chatgpt")) return;
+    if (!isFastModeFunction(fnSource, node) || !fnSource.includes("chatgpt")) return;
     walk(node, (child, parent) => {
       if (
         child.type === "BinaryExpression" &&
@@ -139,7 +162,7 @@ function hasPatchedFastModeGate(ast, source) {
 }
 
 function patchSource(source) {
-  if (!source.includes("fast_mode") || !source.includes("chatgpt")) {
+  if (!isFastModeFunction(source) || !source.includes("chatgpt")) {
     return { status: "not-applicable", source, patches: [] };
   }
 
@@ -197,7 +220,7 @@ function main() {
       if (!f.endsWith(".js")) continue;
       const fp = path.join(assetsDir, f);
       const src = fs.readFileSync(fp, "utf-8");
-      if (src.includes("chatgpt") && src.includes("fast_mode")) {
+      if (src.includes("chatgpt") && isFastModeFunction(src)) {
         targets.push({ platform: plat, path: fp });
       }
     }

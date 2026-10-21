@@ -33,6 +33,14 @@ test("ARM64 排在前面时仍选择 x64 MSIX", () => {
   assert.equal(selectWindowsPackage([ARM64_PACKAGE, X64_PACKAGE]), X64_PACKAGE);
 });
 
+test("商店返回多个乱序版本时选最新 x64 且不修改原列表", () => {
+  const latest = { name: "OpenAI.Codex_26.1016.6573.0_x64__2p2nqsd0c76g0.msix" };
+  const previous = { name: "OpenAI.Codex_26.917.9434.0_x64__2p2nqsd0c76g0.msix" };
+  const list = [previous, ARM64_PACKAGE, latest];
+  assert.equal(selectWindowsPackage(list), latest);
+  assert.deepEqual(list, [previous, ARM64_PACKAGE, latest]);
+});
+
 test("没有 x64 MSIX 时直接失败", () => {
   assert.throws(
     () => selectWindowsPackage([ARM64_PACKAGE]),

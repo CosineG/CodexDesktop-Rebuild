@@ -46,3 +46,16 @@ test("未知上游结构会明确失败而不是静默漏补", () => {
 
   assert.equal(patchSource(source).status, "unexpected-shape");
 });
+
+test("新版直接读取组织请求头无需身份认证，并保留策略读取失败", async () => {
+  const source = "class Preferences{constructor(config){this.config=config}async getExtensionRequestHeaders(){return(await this.config.readRequirements())?.requirements?.browserUse?.extension?.requestHeaders}}";
+  const result = patchSource(source);
+  assert.equal(result.status, "native");
+  assert.equal(result.source, source);
+  const Preferences = Function(`${source};return Preferences`)();
+  const headers = [{ name: "X-Managed", value: "enabled" }];
+  const configured = new Preferences({ readRequirements: async () => ({ requirements: { browserUse: { extension: { requestHeaders: headers } } } }) });
+  assert.deepEqual(await configured.getExtensionRequestHeaders(), headers);
+  assert.equal(await new Preferences({ readRequirements: async () => null }).getExtensionRequestHeaders(), undefined);
+  await assert.rejects(new Preferences({ readRequirements: async () => { throw new Error("policy unavailable"); } }).getExtensionRequestHeaders(), /policy unavailable/);
+});

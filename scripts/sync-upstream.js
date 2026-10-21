@@ -359,9 +359,19 @@ async function getWindowsVersion() {
 }
 
 function selectWindowsPackage(pkgs) {
-  const pkg = pkgs.find(({ name }) =>
+  const candidates = pkgs.filter(({ name }) =>
     typeof name === "string" && WINDOWS_X64_MSIX_RE.test(name)
   );
+  // 商店不保证返回顺序；按数值版本选择最新 x64，不能取第一个或按字符串排序。
+  const pkg = candidates.sort((left, right) => {
+    const a = left.name.split("_")[1].split(".").map(Number);
+    const b = right.name.split("_")[1].split(".").map(Number);
+    for (let index = 0; index < Math.max(a.length, b.length); index++) {
+      const difference = (b[index] || 0) - (a[index] || 0);
+      if (difference !== 0) return difference;
+    }
+    return 0;
+  })[0];
 
   if (pkg) return pkg;
 

@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const vm = require("node:vm");
 
 const { patchSource } = require("./patch-model-catalog-filter");
 
@@ -52,4 +53,15 @@ test("未知模型目录结构明确报错", () => {
 
   assert.equal(result.status, "unexpected-anchor-count");
   assert.equal(result.count, 0);
+});
+
+test("新版访问计划分支只显示未隐藏模型且保留前置拒绝条件", () => {
+  const source = "function filter(flag,list,model,denied,extra){return denied?!1:(flag?list.has(model.model)||extra&&!model.hidden:!model.hidden)}";
+  const result = patchSource(source);
+  assert.equal(result.status, "patched");
+  const filter = vm.runInNewContext(`${result.source};filter`);
+  assert.equal(filter(true, new Set(), { model: "custom", hidden: false }, false, false), true);
+  assert.equal(filter(true, new Set(["custom"]), { model: "custom", hidden: true }, false, true), false);
+  assert.equal(filter(true, new Set(), { model: "custom", hidden: false }, true, true), false);
+  assert.equal(patchSource(result.source).status, "already-patched");
 });

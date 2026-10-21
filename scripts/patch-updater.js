@@ -97,6 +97,7 @@ function locateTargets(platform) {
 function main() {
   const args = process.argv.slice(2);
   const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
+  const check = args.includes("--check");
 
   const targets = locateTargets(platform);
   if (targets.length === 0) {
@@ -122,8 +123,10 @@ function main() {
       code = code.slice(0, p.start) + p.replacement + code.slice(p.end);
     }
 
-    fs.writeFileSync(bundle.path, code, "utf-8");
-    console.log(`    [ok] ${patches.length} updater methods disabled`);
+    // 检查模式只报告，避免升级预检提前改写上游资源。
+    parse(code, { ecmaVersion: "latest", sourceType: "module" });
+    if (!check) fs.writeFileSync(bundle.path, code, "utf-8");
+    console.log(`    [${check ? "?" : "ok"}] ${patches.length} updater methods ${check ? "would be disabled" : "disabled"}`);
   }
 }
 

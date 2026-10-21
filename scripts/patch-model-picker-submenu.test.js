@@ -40,3 +40,10 @@ test("模型选择器子菜单补丁拒绝缺失标签锚点的结构", () => {
   assert.equal(result.status, "unexpected-row-props-count");
   assert.equal(result.count, 0);
 });
+
+test("上游改用点击切换模型列表时保持新选择器不变", () => {
+  const source = "const props={'data-model-picker-view-toggle':true,'data-model-picker-view':'models',label:'composer.modelPicker.modelList.open.ariaLabel',onSelectModelOption:select};";
+  assert.equal(patchSource(source).status, "native");
+  assert.equal(patchSource(source).source, source);
+  assert.notEqual(patchSource(source.replace("data-model-picker-view-toggle", "unrelated")).status, "native");
+});

@@ -37,7 +37,11 @@ function memberPropertyName(node) {
 function matchAllowlistConditional(node, source) {
   if (node.type !== "ConditionalExpression") return null;
 
-  const allowlistCall = node.consequent;
+  // 新版在 allowlist 后增加了 API-key 访问计划分支，仍以同一个 hidden 回退收口。
+  let allowlistCall = node.consequent;
+  while (allowlistCall.type === "LogicalExpression" && allowlistCall.operator === "||") {
+    allowlistCall = allowlistCall.left;
+  }
   const hiddenFallback = node.alternate;
   if (
     allowlistCall.type !== "CallExpression" ||
@@ -134,7 +138,9 @@ function findTargets(platform) {
       if (
         source.includes("availableModels") &&
         source.includes("useHiddenModels") &&
-        source.includes(".hidden")
+        source.includes(".hidden") &&
+        // 仅调用公共过滤器的 chunk 不是补丁目标；必须存在模型成员的 allowlist 判断。
+        (/\.has\([\w$]+\.model\)/.test(source) || source.includes(MARKER))
       ) {
         targets.push({ platform: currentPlatform, path: filePath, source });
       }

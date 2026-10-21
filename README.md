@@ -43,6 +43,29 @@ npm run build:all
 - `patch-realtime-voice-auth.js` 为 API-key 登录放行实时语音入口；实时会话仍由 app-server 使用当前 model provider 的 `base_url` 与认证创建，ChatGPT 工作区能力的认证限制保持不变。
 - 上游更新后应先执行 `npm run patch -- --check` 或完整 `npm run patch`，再运行测试和构建。
 
+### Windows 26.1016.51333 兼容性
+
+- Fast mode 同时覆盖旧权限函数、新版 `readServiceTier` 与界面 `serviceTierAccess` 权限入口，保留加载状态及 `fast_mode = false` 的限制，避免把首页提示里的产品类型判断误当成认证。
+- 模型目录兼容新版访问计划分支；模型选择器已原生支持点击切换完整列表，补丁会明确识别并保留该实现。
+- 侧边栏“复制为 Markdown”会先加载完整会话历史；未挂载会话页面时使用后台完整快照和原生渲染器，空内容、历史不完整或剪贴板失败会显示原生错误提示。
+- 普通目录会话的文件管理器入口兼容新版远程连接 selector，仍保留工作目录与远程连接条件。顶层入口复用工作区原生打开回调，避免侧边栏缺少任务作用域时点击无响应；保留工作树路径解析及失败提示，单次打开不改变默认编辑器。
+- Browser/CUA 的四份 `browser-service.mjs` 均逐份检查；新版从 `configRequirements` 读取托管请求头，保留原生策略及读取错误。
+- Windows 构建通过 Node 直接执行 npm CLI，修复新版 Node 下 `npm.cmd` 的 `EINVAL`。`patch-updater --check` 只检查，不修改文件。
+- 微软商店返回多个 x64 包时按数值版本选择；空链接会重试，摘要不匹配时失败。版本检测任一平台失败会输出 `errors` 并返回退出码 `2`，不会保存不完整的成功状态。
+
+Windows 本地升级可按以下顺序执行；当前程序运行时使用新的输出目录：
+
+```powershell
+npm run sync -- --skip-mac
+npm run patch -- win --check
+npm run patch -- win
+npm test
+$env:CODEX_OUT_DIR = 'out-upgrade'
+npm run build
+```
+
+检查模式用于判断补丁是否兼容；正式应用后应再次运行检查，确认无待修改项。新版 CLI 与桌面端保持同包，不单独替换 CLI。此次 Windows 升级记录见 [2026-10-21 验证记录](docs/upgrades/2026-10-21.md)，后续修复见 [资源管理器修复记录](docs/upgrades/2026-10-21-explorer-fix.md)；最新菜单修复包与实测范围见 [菜单专项回归记录](docs/upgrades/2026-10-21-menu-audit.md)。
+
 ## Development
 
 ```bash

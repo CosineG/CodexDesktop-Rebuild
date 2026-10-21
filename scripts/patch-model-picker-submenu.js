@@ -6,6 +6,7 @@
  * 指针跨越两者间隙时会触发悬浮关闭，导致模型项很难点中。模型项本来就会
  * preventDefault 保持选择器打开，因此改为内联子菜单后，选择会立即勾选，
  * 并仅在用户点击选择器外部时关闭。
+ * 26.1016 已改为点击切换完整模型列表，识别该结构后保留上游交互。
  *
  * Usage:
  *   node scripts/patch-model-picker-submenu.js [platform]
@@ -34,6 +35,14 @@ const ROW_PROPS_RE =
 const LEGACY_CONDITION_RE =
   /if\(([\w$]+)\(\)\|\|([\w$]+)\?\.props\?\.\[`data-model-picker-model-row`\]===!0\)/g;
 
+function hasNativeModelList(source) {
+  return !source.includes("data-model-picker-model-row") &&
+    ["data-model-picker-view-toggle", "data-model-picker-view",
+      "composer.modelPicker.modelList.open.ariaLabel", "onSelectModelOption"].every(
+      (marker) => source.includes(marker),
+    );
+}
+
 function getPlatforms(platform) {
   if (platform) return [platform];
   return PLATFORMS.filter((item) =>
@@ -57,7 +66,8 @@ function findTargets(platform) {
       if (!file.endsWith(".js")) continue;
       const filePath = path.join(assetsDir, file);
       const source = fs.readFileSync(filePath, "utf-8");
-      if (TARGET_SIGNATURES.every((signature) => source.includes(signature))) {
+      if (TARGET_SIGNATURES.every((signature) => source.includes(signature)) ||
+          hasNativeModelList(source)) {
         targets.push({ platform: currentPlatform, path: filePath, source });
       }
     }
@@ -75,6 +85,7 @@ function parseOk(code) {
 }
 
 function patchSource(source) {
+  if (hasNativeModelList(source)) return { status: "native", source };
   const rowPropsMatches = [...source.matchAll(ROW_PROPS_RE)];
   if (rowPropsMatches.length !== 1) {
     return {
@@ -139,8 +150,8 @@ function main() {
     const label = relPath(target.path);
     const result = patchSource(target.source);
 
-    if (result.status === "already-patched") {
-      console.log(`  [ok] ${label}: already patched`);
+    if (result.status === "already-patched" || result.status === "native") {
+      console.log(`  [ok] ${label}: ${result.status === "native" ? "upstream opens the model list on click" : "already patched"}`);
       continue;
     }
     if (result.status === "upgraded") {

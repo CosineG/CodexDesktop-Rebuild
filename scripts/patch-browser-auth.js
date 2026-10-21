@@ -10,6 +10,7 @@
  * 这里保留 ChatGPT 登录下的原有身份与 Statsig 流程；仅当该流程失败时，
  * 将 request-header 能力降级为关闭，恢复旧版可继续建立本地浏览器通道的行为。
  * 不会把 API key 当作 ChatGPT token 发送到 chatgpt.com。
+ * 新版直接从 configRequirements 读取托管请求头时，保留该原生路径和策略错误。
  */
 const fs = require("fs");
 const path = require("path");
@@ -123,6 +124,9 @@ function applyPatches(source, patches) {
 
 function patchSource(source) {
   if (!source.includes(REQUEST_HEADER_GATE)) {
+    if (/async getExtensionRequestHeaders\(\)\{return\(await this\.config\.readRequirements\(\)\)\?\.requirements\?\.browserUse\?\.extension\?\.requestHeaders\}/.test(source)) {
+      return { status: "native", source, count: 0 };
+    }
     return { status: "not-applicable", source, count: 0 };
   }
 
@@ -179,10 +183,8 @@ function locateTargets(platform) {
     ];
     for (const root of roots) {
       for (const filePath of findBrowserServices(root)) {
-        const source = fs.readFileSync(filePath, "utf8");
-        if (source.includes(REQUEST_HEADER_GATE)) {
-          targets.push({ platform: name, path: filePath });
-        }
+        // 每一份真实 runtime 都必须识别为旧版可修补或新版原生支持，不能因锚点消失漏检。
+        targets.push({ platform: name, path: filePath });
       }
     }
   }
@@ -205,10 +207,17 @@ function main() {
 
   let patched = 0;
   let alreadyPatched = 0;
+  let native = 0;
   for (const target of targets) {
     const source = fs.readFileSync(target.path, "utf8");
     const result = patchSource(source);
     const label = `[${target.platform}] ${relPath(target.path)}`;
+
+    if (result.status === "native") {
+      console.log(`[ok] ${label}: upstream reads managed headers without caller identity`);
+      native++;
+      continue;
+    }
 
     if (result.status === "patched") {
       if (check) {
@@ -230,7 +239,7 @@ function main() {
   }
 
   console.log(
-    `[ok] Browser auth targets: ${targets.length}, patched: ${patched}, already: ${alreadyPatched}`,
+    `[ok] Browser auth targets: ${targets.length}, patched: ${patched}, already: ${alreadyPatched}, native: ${native}`,
   );
 }
 

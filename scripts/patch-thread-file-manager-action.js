@@ -4,7 +4,10 @@
  *
  * 26.825 起，上游把工作区的所有打开目标统一收进“打开方式”子菜单；
  * 26.901 又把侧边栏会话菜单拆到 app-primary，并仅为 Git 会话调用该菜单；
- * 26.908 将该限制移入派生选择器；26.911 又将菜单构造器移回 app-initial。
+ * 26.908 将该限制移入派生选择器；26.911 又将菜单构造器移回 app-initial；
+ * 26.1016 的远程连接状态改为读取独立 selector，不再内联配置项名称。
+ * 顶层入口复用工作区菜单的打开回调，保留工作树解析和失败提示；不能调用
+ * 需要 ThreadScope 的文件预览函数，否则全局侧边栏会抛 Missing scope instance。
  * 本补丁先复用打开链路增加顶层入口，再按内容定位侧边栏菜单并放宽两种
  * 结构中的 Git 限制，使所有有工作目录的本地会话都能显示入口。旧版若已
  * 提供 open-thread-folder，则安全跳过。
@@ -18,7 +21,8 @@ const acorn = require("acorn");
 const { locateBundles, relPath } = require("./patch-util");
 
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
-const MARKER = "/* Codex：对话菜单直接显示系统文件管理器入口。 */";
+const LEGACY_MARKER = "/* Codex：对话菜单直接显示系统文件管理器入口。 */";
+const MARKER = "/* Codex：对话菜单通过工作区打开链路显示系统文件管理器入口（v2）。 */";
 const SIDEBAR_MARKER =
   "/* Codex：侧边栏会话菜单对普通目录显示打开入口。 */";
 const DIRECT_ACTION_ID = "open-workspace-file-manager-direct";
@@ -174,7 +178,6 @@ function parse(source) {
 
 function findPatchContext(ast, source) {
   const menuBuilders = [];
-  const openHelpers = [];
 
   walk(ast, (node) => {
     if (node.type !== "FunctionDeclaration" || node.id?.type !== "Identifier") {
@@ -185,15 +188,7 @@ function findPatchContext(ast, source) {
     const mayBuildMenu = ["scope", "cwd", "hostId"].every((key) =>
       bindings.has(key),
     );
-    const mayOpenItem = [
-      "scope",
-      "cwd",
-      "hostId",
-      "path",
-      "target",
-      "openMode",
-    ].every((key) => bindings.has(key));
-    if (!mayBuildMenu && !mayOpenItem) return;
+    if (!mayBuildMenu) return;
     const code = source.slice(node.start, node.end);
 
     if (
@@ -233,16 +228,63 @@ function findPatchContext(ast, source) {
       menuBuilders.push({ bindings, returns, targetsVariables });
     }
 
-    if (
-      mayOpenItem &&
-      code.includes("persistPreferredTargetPath") &&
-      code.includes("openInSidePanel")
-    ) {
-      openHelpers.push(node.id.name);
-    }
   });
 
-  return { menuBuilders, openHelpers };
+  return { menuBuilders };
+}
+
+function workspaceOpenCallback(call, source, scope) {
+  const callback = objectExpressionProperties(call.arguments[0]).get("onOpenInTarget");
+  if (!callback || !["ArrowFunctionExpression", "FunctionExpression"].includes(callback.type)) {
+    return null;
+  }
+  const edits = [];
+  let hasOpenMutation = false;
+  walk(callback, (node) => {
+    if (node.type === "Property" && propertyName(node) === "persistPreferredTargetPath") {
+      // 单次打开资源管理器不能覆盖用户偏好的编辑器或终端。
+      edits.push({ start: node.value.start, end: node.value.end, text: "void 0" });
+    }
+    if (node.type !== "CallExpression") return;
+    const properties = objectExpressionProperties(node.arguments[0]);
+    if (["mutate", "mutateAsync"].includes(memberName(node.callee)) &&
+        ["path", "cwd", "hostId", "target", "openMode"].every((key) => properties.has(key))) {
+      hasOpenMutation = true;
+    }
+    const owner = node.callee?.object;
+    if (memberName(node.callee) === "setData" && memberName(owner) === "query" &&
+        owner.object?.name === scope && source.slice(node.start, node.end).includes("preferredTarget")) {
+      edits.push({ start: node.start, end: node.end, text: "void 0" });
+    }
+  });
+  if (!hasOpenMutation) return null;
+  let code = source.slice(callback.start, callback.end);
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    code = code.slice(0, edit.start - callback.start) + edit.text + code.slice(edit.end - callback.start);
+  }
+  return code;
+}
+
+function restoreLegacyMenu(ast, source) {
+  const contexts = [];
+  walk(ast, (node) => {
+    if (node.type !== "FunctionDeclaration") return;
+    let declaration;
+    for (const statement of node.body.body) {
+      if (statement.type !== "VariableDeclaration") continue;
+      const value = statement.declarations.find((item) =>
+        item.id?.name === "__codexOpenWorkspaceItems" && item.init?.type === "CallExpression");
+      if (value) declaration = { statement, value };
+    }
+    const returns = node.body.body.filter((statement) => statement.type === "ReturnStatement" &&
+      statement.argument?.type === "ArrayExpression" &&
+      source.slice(statement.start, statement.end).includes(LEGACY_MARKER));
+    if (declaration && returns.length === 1) contexts.push({ ...declaration, returnNode: returns[0] });
+  });
+  if (contexts.length !== 1) return null;
+  const { statement, value, returnNode } = contexts[0];
+  return source.slice(0, statement.start) + `return ${source.slice(value.init.start, value.init.end)};` +
+    source.slice(returnNode.end);
 }
 
 function findSidebarPatchContexts(ast, source) {
@@ -279,7 +321,8 @@ function findSidebarPatchContexts(ast, source) {
       conversationId == null ||
       hostId == null ||
       get == null ||
-      !code.includes("remote_control_connections")
+      !(code.includes("remote_control_connections") ||
+        (code.includes(".some(") && code.includes(`.hostId===${hostId}`)))
     ) {
       return;
     }
@@ -457,7 +500,14 @@ function patchSource(source) {
     return { status: "parse-failed", phase: "before", error, source };
   }
 
-  const { menuBuilders, openHelpers } = findPatchContext(ast, source);
+  if (source.includes(LEGACY_MARKER)) {
+    const restored = restoreLegacyMenu(ast, source);
+    if (restored == null) return { status: "unexpected-legacy-menu", source };
+    const result = patchSource(restored);
+    return result.status === "patched" ? result : { ...result, source };
+  }
+
+  const { menuBuilders } = findPatchContext(ast, source);
   if (menuBuilders.length === 0 && hasNativeAction) {
     return { status: "native", source };
   }
@@ -468,14 +518,6 @@ function patchSource(source) {
       source,
     };
   }
-  if (openHelpers.length !== 1) {
-    return {
-      status: "unexpected-open-helper-count",
-      count: openHelpers.length,
-      source,
-    };
-  }
-
   const [{ bindings, returns, targetsVariables }] = menuBuilders;
   if (returns.length !== 1) {
     return {
@@ -487,8 +529,8 @@ function patchSource(source) {
 
   const [returnNode] = returns;
   const scope = bindings.get("scope");
-  const cwd = bindings.get("cwd");
-  const hostId = bindings.get("hostId");
+  const callback = workspaceOpenCallback(returnNode.argument, source, scope);
+  if (callback == null) return { status: "missing-workspace-open-callback", source };
   const originalItems = source.slice(
     returnNode.argument.start,
     returnNode.argument.end,
@@ -496,8 +538,10 @@ function patchSource(source) {
   const itemsVariable = "__codexOpenWorkspaceItems";
   const targetVariable = "__codexFileManagerTarget";
   const platformVariable = "__codexDesktopPlatform";
+  const callbackVariable = "__codexOpenWorkspaceInTarget";
   const replacement = [
     `let ${itemsVariable}=${originalItems};`,
+    `let ${callbackVariable}=${callback};`,
     ...(targetsVariables.length === 1
       ? [
           `let ${targetVariable}=${targetsVariables[0]}?.targets.find(` +
@@ -516,10 +560,7 @@ function patchSource(source) {
         ? `${targetVariable}?.resolvedIcon??${targetVariable}?.icon??`
         : ""
     }${itemsVariable}[0]?.icon,`,
-    `onSelect:()=>${openHelpers[0]}({`,
-    `scope:${scope},path:${cwd},cwd:${cwd},hostId:${hostId},`,
-    "target:`fileManager`,openMode:`workspace`",
-    "})},",
+    `onSelect:()=>${callbackVariable}(\`fileManager\`)},`,
     `...${itemsVariable}]`,
   ].join("");
   const next =
@@ -686,6 +727,7 @@ if (require.main === module) main();
 
 module.exports = {
   DIRECT_ACTION_ID,
+  LEGACY_MARKER,
   MARKER,
   SIDEBAR_MARKER,
   findTargets,

@@ -386,31 +386,23 @@ async function getFileList(cookie, categoryId, ring) {
   return updates;
 }
 
-async function getDownloadUrl(updateID, revisionNumber, ring, digest) {
+async function getDownloadUrl(updateID, revisionNumber, ring, digest, options = {}) {
   const soap = makeGetUrlSoap(updateID, revisionNumber, ring);
-  const res = await soapPost(
-    "https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx/secured",
-    soap
-  );
-
-  if (res.status !== 200) return "";
-
-  const parsed = parseXml(res.body);
-  const locations = deepFindAll(parsed, "FileLocation");
-
-  for (const loc of locations) {
-    const fileDigest = deepFind(loc, "FileDigest");
-    const url = deepFind(loc, "Url");
-    if (fileDigest === digest && url) return url;
-  }
-
-  // 如果 digest 匹配不到，返回第一个 URL
-  for (const loc of locations) {
-    const url = deepFind(loc, "Url");
-    if (url && typeof url === "string" && url.startsWith("http")) return url;
-  }
-
-  return "";
+  const request = options.request || soapPost;
+  // 商店灰度发布时可能 HTTP 200 但尚无 FileLocations；同一更新重试，不能换成其他文件。
+  return withRetry(async () => {
+    const res = await request(
+      "https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx/secured", soap,
+    );
+    if (res.status !== 200) throw new Error(`GetExtendedUpdateInfo2 失败: HTTP ${res.status}`);
+    const locations = deepFindAll(parseXml(res.body), "FileLocation");
+    for (const loc of locations) {
+      const url = deepFind(loc, "Url");
+      if (digest && deepFind(loc, "FileDigest") === digest &&
+          typeof url === "string" && /^https?:\/\//.test(url)) return url;
+    }
+    throw new Error(`微软未返回与包摘要匹配的下载链接 (${updateID})`);
+  }, options);
 }
 
 // ─── 深度搜索辅助 ────────────────────────────────────────────────
@@ -596,8 +588,12 @@ async function main() {
   // Step 4: Get URLs
   console.log(`  [4/4] 获取下载链接...`);
   const results = [];
+  const selected = filter
+    ? packages.filter((pkg) => pkg.name.toLowerCase().includes(filter))
+    : packages;
 
-  for (const pkg of packages) {
+  // 先过滤再取链接，避免不需要的 ARM64 或依赖包下载失败阻断 x64 下载。
+  for (const pkg of selected) {
     const url = await getDownloadUrl(
       pkg.updateID,
       pkg.revisionNumber,

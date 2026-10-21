@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
 
-const { findUpdates, resolveVersionFile } = require("./check-update");
+const { findUpdates, resolveVersionFile, summarizeChecks } = require("./check-update");
 
 const CURRENT_PLATFORMS = [
   { platform: "macOS-arm64", version: "26.721.41059", build: "5848" },
@@ -53,4 +53,14 @@ test("缺少状态文件路径时直接失败", () => {
     () => resolveVersionFile(["--state-file", "--json"]),
     /需要提供文件路径/
   );
+});
+
+test("单个平台检测失败会保留错误而不是伪装全部成功", () => {
+  const result = summarizeChecks([
+    { status: "fulfilled", value: CURRENT_PLATFORMS[0] },
+    { status: "fulfilled", value: CURRENT_PLATFORMS[1] },
+    { status: "rejected", reason: new Error("下载链接不可用") },
+  ]);
+  assert.equal(result.results.length, 2);
+  assert.deepEqual(result.errors, { Windows: "下载链接不可用" });
 });

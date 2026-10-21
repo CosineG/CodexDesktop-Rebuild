@@ -5,6 +5,7 @@ const vm = require("node:vm");
 
 const {
   DIRECT_ACTION_ID,
+  LEGACY_MARKER,
   MARKER,
   SIDEBAR_MARKER,
   hasSidebarMenuSignatures,
@@ -47,26 +48,37 @@ function createGroupedMenuBundle(options = {}) {
   return openHelper + menuBuilder;
 }
 
-function evaluatePatchedMenu(source, platform) {
+function evaluatePatchedMenu(source, platform, options = {}) {
   const context = {
     navigator: { userAgentData: { platform } },
     targets: {},
     openMutation: {},
     opened: null,
-    makeOpenMenu: () => [{ id: "open-workspace-in", icon: "open-icon" }],
+    makeOpenMenu: (input) => [{ id: "open-workspace-in", icon: "open-icon", onOpenInTarget: input.onOpenInTarget }],
   };
   context.scope = {
-    get: () => ({ mutate() {} }),
-    open: (params) => {
-      context.opened = params;
-    },
+    get: () => ({
+      mutate(params) { context.opened = params; },
+      async mutateAsync(params) {
+        if (options.reject) throw new Error("测试打开失败");
+        context.opened = params;
+        return { success: options.success !== false };
+      },
+    }),
+    // 侧边栏只有全局作用域，预览函数不能在这里读取任务作用域。
+    getOwnValue() { throw new Error("Missing scope instance"); },
+    open() { throw new Error("不能通过文件预览函数打开目录"); },
     query: {
       fetch: () => Promise.resolve(),
+      setData() { context.preferredTargetChanged = true; },
       getData: () => ({
         targets: [{ target: "fileManager", resolvedIcon: "folder-icon" }],
       }),
     },
   };
+  context.ensureWorkspace = async () => { context.resolvedWorkspace = "C:\\最新工作树"; };
+  context.resolveWorkspace = (fallback) => context.resolvedWorkspace ?? fallback;
+  context.reportError = () => { context.reportedErrors = (context.reportedErrors ?? 0) + 1; };
   vm.runInNewContext(
     `${source};result=buildOpenItems({scope,cwd:\`C:\\\\repo\`,hostId:\`local\`})`,
     context,
@@ -137,7 +149,7 @@ test("新版对话菜单增加顶层文件管理器入口并保留打开方式�
   assert.ok(result.source.includes(`id:\`${DIRECT_ACTION_ID}\``));
   assert.match(
     result.source,
-    /onSelect:\(\)=>openItem\(\{scope:s,path:c,cwd:c,hostId:h,target:`fileManager`,openMode:`workspace`\}\)/,
+    /onSelect:\(\)=>__codexOpenWorkspaceInTarget\(`fileManager`\)/,
   );
   assert.match(
     result.source,
@@ -259,6 +271,26 @@ test("侧边栏结构变化时明确失败而不是静默跳过", () => {
   assert.equal(result.count, 0);
 });
 
+test("新版远程连接 selector 仍保留远程排除且允许本地普通目录", () => {
+  const original = createSelectorSidebarMenuBundle().replace(
+    "getState(g,`remote_control_connections`)", "g(remoteConnections)",
+  );
+  const result = patchSidebarSource(original);
+  assert.equal(result.status, "patched");
+  for (const connected of [false, true]) {
+    const connections = connected ? [{ hostId: "local" }] : [];
+    const context = {
+      store: {}, gitBacked: {}, remoteConnections: {},
+      derive: (_store, selector) => selector,
+    };
+    const gate = vm.runInNewContext(`${result.source};sidebarGate`, context);
+    assert.equal(gate({ conversationId: "thread", hostId: "local" }, {
+      get: (selector) => selector === context.remoteConnections ? connections : false,
+    }), !connected);
+  }
+  assert.equal(patchSidebarSource(result.source).status, "already-patched");
+});
+
 test("补丁重复执行保持幂等", () => {
   const first = patchSource(createGroupedMenuBundle());
   const second = patchSource(first.source);
@@ -286,7 +318,8 @@ test("顶层入口按系统显示文案并复用 fileManager 打开链路", () =
     context.result[0].onSelect();
     assert.equal(context.opened.target, "fileManager");
     assert.equal(context.opened.cwd, "C:\\repo");
-    assert.equal("persistPreferredTargetPath" in context.opened, false);
+    assert.equal(context.opened.persistPreferredTargetPath, undefined);
+    assert.equal(context.preferredTargetChanged, undefined);
   }
 });
 
@@ -308,11 +341,65 @@ test("新旧菜单实现共存时优先修补新版动作聚合器", () => {
   assert.ok(result.source.includes(MARKER));
 });
 
-test("打开链路缺失时拒绝生成不完整补丁", () => {
-  const result = patchSource(
-    createGroupedMenuBundle({ includeOpenHelper: false }),
-  );
+test("工作区菜单不再依赖需要任务作用域的预览函数", () => {
+  const result = patchSource(createGroupedMenuBundle({ includeOpenHelper: false }));
+  assert.equal(result.status, "patched");
+  const context = evaluatePatchedMenu(result.source, "Windows");
+  assert.doesNotThrow(() => context.result[0].onSelect());
+  assert.equal(context.opened.path, "C:\\repo");
+});
 
-  assert.equal(result.status, "unexpected-open-helper-count");
-  assert.equal(result.count, 0);
+test("工作区打开回调缺失时拒绝生成没有动作的菜单", () => {
+  const original = createGroupedMenuBundle().replace("onOpenInTarget:", "changedOpenHandler:");
+  const result = patchSource(original);
+  assert.equal(result.status, "missing-workspace-open-callback");
+  assert.equal(result.source, original);
+});
+
+function createCurrentWorkspaceBundle() {
+  return createGroupedMenuBundle().replace(
+    "onOpenInTarget:(target,appPath)=>{s.get(openMutation).mutate({path:c,cwd:c,hostId:h,target,appPath,openMode:`workspace`,persistPreferredTargetPath:c},{onError:report})}",
+    "onOpenInTarget:async(target,appPath)=>{try{await ensureWorkspace();let cwd=resolveWorkspace(c);s.query.setData(targets,request,data=>({...data,preferredTarget:target}));let result=await s.get(openMutation).mutateAsync({path:cwd,cwd,hostId:h,target,appPath,openMode:`workspace`,persistPreferredTargetPath:cwd});if(!result.success)reportError()}catch(error){reportError()}}",
+  );
+}
+
+test("新版回调先解析最新工作树，直接打开不改变默认编辑器", async () => {
+  const result = patchSource(createCurrentWorkspaceBundle());
+  assert.equal(result.status, "patched");
+  const context = evaluatePatchedMenu(result.source, "Windows");
+  await context.result[0].onSelect();
+  assert.equal(context.opened.path, "C:\\最新工作树");
+  assert.equal(context.opened.cwd, "C:\\最新工作树");
+  assert.equal(context.opened.target, "fileManager");
+  assert.equal(context.opened.hostId, "local");
+  assert.equal(context.opened.persistPreferredTargetPath, undefined);
+  assert.equal(context.preferredTargetChanged, undefined);
+  await context.result[1].onOpenInTarget("vscode", "C:\\Code.exe");
+  assert.equal(context.preferredTargetChanged, true);
+  assert.equal(context.opened.persistPreferredTargetPath, "C:\\最新工作树");
+  assert.equal(context.opened.target, "vscode");
+});
+
+test("系统打开返回失败或抛异常时保留原生错误提示", async () => {
+  const { source } = patchSource(createCurrentWorkspaceBundle());
+  for (const options of [{ success: false }, { reject: true }]) {
+    const context = evaluatePatchedMenu(source, "Windows", options);
+    await context.result[0].onSelect();
+    assert.equal(context.reportedErrors, 1);
+  }
+});
+
+test("已应用旧补丁的菜单原地升级且不会重复插入", () => {
+  const source = createGroupedMenuBundle();
+  const old = source.replace("return makeOpenMenu({", "let __codexOpenWorkspaceItems=makeOpenMenu({")
+    .replace("})}const copyMessage", `});let __codexDesktopPlatform=\`win\`;return[{${LEGACY_MARKER}id:\`${DIRECT_ACTION_ID}\`,onSelect:()=>openItem({scope:s,path:c,cwd:c,hostId:h,target:\`fileManager\`,openMode:\`workspace\`})},...__codexOpenWorkspaceItems]}const copyMessage`);
+  assert.ok(old.includes(LEGACY_MARKER));
+  const result = patchSource(old);
+  assert.equal(result.status, "patched");
+  assert.equal(result.source.includes(LEGACY_MARKER), false);
+  assert.equal(result.source.split(DIRECT_ACTION_ID).length - 1, 1);
+  const context = evaluatePatchedMenu(result.source, "Windows");
+  context.result[0].onSelect();
+  assert.equal(context.opened.target, "fileManager");
+  assert.equal(patchSource(result.source).status, "already-patched");
 });
