@@ -170,11 +170,15 @@ jobs:
   build-linux:
     needs: check
     if: needs.check.outputs.has_update == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -211,6 +215,13 @@ jobs:
 
       - name: Build
         run: npm run build:linux-${{ matrix.arch }}
+
+      - name: Verify packaged Linux CLI resources
+        run: |
+          resources="out/Codex-linux-${{ matrix.arch }}/resources"
+          "$resources/codex" --version
+          "$resources/rg" --version
+          "$resources/codex-resources/bwrap" --version
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

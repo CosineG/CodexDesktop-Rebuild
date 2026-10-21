@@ -45,6 +45,7 @@ jobs:
           cache: npm
       - run: |
           npm ci
+      - run: npm test
       - run: |
           brew install --quiet sevenzip
       - run: node scripts/sync-upstream.js --force --skip-win
@@ -85,11 +86,15 @@ jobs:
 
   build-linux:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'linux' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
       - name: Free disk space
@@ -106,12 +111,19 @@ jobs:
           cache: npm
       - run: |
           npm ci
+      - run: npm test
       - run: |
           sudo apt-get update
           sudo apt-get install -y rpm fakeroot dpkg 7zip unzip
       - run: node scripts/sync-upstream.js --force --skip-win
       - run: node scripts/patch-all.js mac-${{ matrix.arch }}
       - run: npm run build:linux-${{ matrix.arch }}
+      - name: Verify packaged Linux CLI resources
+        run: |
+          resources="out/Codex-linux-${{ matrix.arch }}/resources"
+          "$resources/codex" --version
+          "$resources/rg" --version
+          "$resources/codex-resources/bwrap" --version
       - uses: actions/upload-artifact@v7
         with:
           name: Codex-Linux-${{ matrix.arch }}

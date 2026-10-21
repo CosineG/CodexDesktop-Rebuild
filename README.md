@@ -92,6 +92,10 @@ npm run dev
 
 ## CI/CD
 
+构建兼容新版上游资源布局：macOS 保留 `codex-cli/CodexCLI.app` 内的同包 CLI；Linux 同时识别 npm 平台包的新旧目录，并安装匹配架构的 CLI、`rg`、code-mode host 与沙箱资源。缺少必要资源时立即失败，不再保留不能在 Linux 运行的 macOS 二进制。
+
+Linux x64 / ARM64 分别在对应架构的 runner 上编译原生模块，打包后实际执行 CLI、`rg` 和 `bwrap` 的版本检查。手动构建在各平台执行回归测试。
+
 GitHub Actions automatically builds on:
 - Push to `master` / `main` and tag `v*` → build artifacts
 - 每日上游同步工作流：逐平台比较已保存的版本；仅在任一平台版本变化时下载上游、重新应用补丁、构建并更新 Release

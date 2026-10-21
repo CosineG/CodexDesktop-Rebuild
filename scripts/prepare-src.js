@@ -9,7 +9,7 @@
  *
  * For macOS and Windows: keep the bundled CLI so app-server, code-mode host,
  * and local tool runtimes stay protocol-aligned.
- * For Linux: strip macOS-only resources and add Linux codex from @cometix/codex.
+ * Linux 从 @cometix/codex 安装 CLI、rg、code-mode host 及沙箱资源。
  *
  * Usage:
  *   node scripts/prepare-src.js --platform mac-arm64
@@ -22,6 +22,7 @@ const {
   getCodexBinarySource,
   getCometixCodexPackageSpec,
 } = require("./codex-binary-policy");
+const { resolveUpstreamCodex, installLinuxCodexResources } = require("./codex-resources");
 
 const SRC = path.join(__dirname, "..", "src");
 const PROJECT_ROOT = path.join(__dirname, "..");
@@ -168,22 +169,6 @@ function ensureVendorExtracted(platform) {
   return null;
 }
 
-function resolveCodexVendor(platform) {
-  const vendorRoot = ensureVendorExtracted(platform);
-  if (!vendorRoot) return null;
-  const binName = platform === "win" ? "codex.exe" : "codex";
-  const p = path.join(vendorRoot, "codex", binName);
-  return fs.existsSync(p) ? p : null;
-}
-
-function resolveRgVendor(platform) {
-  const vendorRoot = ensureVendorExtracted(platform);
-  if (!vendorRoot) return null;
-  const binName = platform === "win" ? "rg.exe" : "rg";
-  const p = path.join(vendorRoot, "path", binName);
-  return fs.existsSync(p) ? p : null;
-}
-
 function main() {
   const args = process.argv.slice(2);
   const platIdx = args.indexOf("--platform");
@@ -236,36 +221,14 @@ function main() {
   const isWin = platform === "win";
   const codexBinName = isWin ? "codex.exe" : "codex";
   const binarySource = getCodexBinarySource(platform);
-  const vendorCodex = binarySource === "cometix" ? resolveCodexVendor(platform) : null;
   if (binarySource === "upstream") {
-    const upstreamCodex = path.join(sourceDir, codexBinName);
-    if (!fs.existsSync(upstreamCodex)) {
-      console.error(`[x] Upstream ${codexBinName} not found for ${platform}`);
-      process.exit(1);
-    }
-    console.log(`   [codex] keeping upstream ${codexBinName}`);
-  } else if (vendorCodex) {
-    // Linux 复用 macOS 应用资源，因此必须换成目标架构可执行文件。
-    const dest = path.join(sourceDir, codexBinName);
-    fs.copyFileSync(vendorCodex, dest);
-    try { fs.chmodSync(dest, 0o755); } catch {}
-    console.log(`   [codex] replaced with @cometix/codex`);
+    const upstreamCodex = resolveUpstreamCodex(platform, sourceDir, codexBinName);
+    console.log(`   [codex] keeping upstream ${path.relative(sourceDir, upstreamCodex)}`);
   } else {
-    console.error(`[x] @cometix/codex vendor not found for ${platform}`);
-    process.exit(1);
-  }
-
-  // 2b. For Linux: replace rg with platform-native version from @cometix/codex
-  if (isLinux) {
-    const vendorRg = resolveRgVendor(platform);
-    if (vendorRg) {
-      const dest = path.join(sourceDir, "rg");
-      fs.copyFileSync(vendorRg, dest);
-      try { fs.chmodSync(dest, 0o755); } catch {}
-      console.log(`   [rg] replaced with Linux rg from @cometix/codex`);
-    } else {
-      console.log(`   [!] Linux rg not found in vendor, keeping upstream (will fail on Linux)`);
-    }
+    const vendorRoot = ensureVendorExtracted(platform);
+    if (!vendorRoot) throw new Error(`@cometix/codex vendor not found for ${platform}`);
+    const installed = installLinuxCodexResources(vendorRoot, sourceDir);
+    console.log(`   [codex] installed Linux resources: ${installed.join(", ")}`);
   }
 
   // 3. For Linux: copy _asar/ content to flat src/ (forge packs ASAR from src/)
