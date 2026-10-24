@@ -92,6 +92,8 @@ npm run dev
 
 ## CI/CD
 
+26.1021 上游将工作区与侧边栏菜单移至 `app-primary`；文件管理器补丁按菜单内容在 `app-initial` / `app-primary` 中逐平台定位，不再依赖远程连接配置名。补丁仍保留工作目录和远程连接条件、原生打开回调与错误提示；未知菜单结构会明确报错。
+
 构建兼容新版上游资源布局：macOS 保留 `codex-cli/CodexCLI.app` 内的同包 CLI；Linux 同时识别 npm 平台包的新旧目录，并安装匹配架构的 CLI、`rg`、code-mode host 与沙箱资源。缺少必要资源时立即失败，不再保留不能在 Linux 运行的 macOS 二进制。
 
 Linux x64 / ARM64 分别在对应架构的 runner 上编译原生模块，打包后实际执行 CLI、`rg` 和 `bwrap` 的版本检查。手动构建在各平台执行回归测试。

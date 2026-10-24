@@ -12,6 +12,7 @@ const {
   hasNativeDirectAction,
   patchSidebarSource,
   patchSource,
+  selectTargets,
 } = require("./patch-thread-file-manager-action");
 
 function createGroupedMenuBundle(options = {}) {
@@ -289,6 +290,71 @@ test("新版远程连接 selector 仍保留远程排除且允许本地普通目�
     }), !connected);
   }
   assert.equal(patchSidebarSource(result.source).status, "already-patched");
+});
+
+test("26.1021 菜单迁到 app-primary 且没有远程配置名时仍应用两类补丁", () => {
+  const source = createCurrentWorkspaceBundle() + createSelectorSidebarMenuBundle()
+    .replace("getState(g,`remote_control_connections`)", "g(remoteConnections)");
+  const bundles = [
+    { platform: "win", path: "app-initial-new.js", source: "const initial=true;" },
+    { platform: "win", path: "app-primary-new.js", source },
+  ];
+  assert.equal(source.includes("remote_control_connections"), false);
+  const targets = selectTargets(bundles);
+  assert.deepEqual(targets.map(({ path, patchKind }) => [path, patchKind]), [
+    ["app-primary-new.js", "open-menu"],
+    ["app-primary-new.js", "sidebar"],
+  ]);
+
+  let patched = source;
+  for (const target of targets) {
+    const patch = target.patchKind === "sidebar" ? patchSidebarSource : patchSource;
+    const result = patch(patched);
+    assert.equal(result.status, "patched");
+    patched = result.source;
+  }
+  assert.ok(patched.includes(MARKER));
+  assert.ok(patched.includes(SIDEBAR_MARKER));
+  const repeated = selectTargets([bundles[0], { ...bundles[1], source: patched }]);
+  assert.equal(repeated.length, 2);
+  for (const target of repeated) {
+    const patch = target.patchKind === "sidebar" ? patchSidebarSource : patchSource;
+    assert.equal(patch(target.source).status, "already-patched");
+  }
+});
+
+test("按平台独立定位菜单并兼容旧版分离的 chunk", () => {
+  const targets = selectTargets([
+    { platform: "mac-arm64", path: "mac/app-initial.js", source: createGroupedMenuBundle() },
+    { platform: "win", path: "win/app-initial.js", source: "const initial=true;" },
+    { platform: "mac-arm64", path: "mac/app-primary.js", source: createSidebarMenuBundle() },
+    { platform: "win", path: "win/app-primary.js", source: createGroupedMenuBundle() + createSidebarMenuBundle() },
+  ]);
+  assert.deepEqual(targets.map(({ path, patchKind }) => [path, patchKind]), [
+    ["mac/app-initial.js", "open-menu"],
+    ["mac/app-primary.js", "sidebar"],
+    ["win/app-primary.js", "open-menu"],
+    ["win/app-primary.js", "sidebar"],
+  ]);
+});
+
+test("原生目录入口移到 app-primary 后仍能识别", () => {
+  const targets = selectTargets([
+    { platform: "win", path: "app-initial.js", source: "const initial=true;" },
+    { platform: "win", path: "app-primary.js", source: "const items=[{id:`open-thread-folder`}];" },
+  ]);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].path, "app-primary.js");
+  assert.equal(patchSource(targets[0].source).status, "native");
+});
+
+test("未知菜单结构仍返回待检查目标并明确失败", () => {
+  const targets = selectTargets([
+    { platform: "win", path: "app-initial.js", source: "const changedMenu=true;" },
+    { platform: "win", path: "app-primary.js", source: "const primary=true;" },
+  ]);
+  assert.equal(targets.length, 1);
+  assert.equal(patchSource(targets[0].source).status, "unexpected-menu-builder-count");
 });
 
 test("补丁重复执行保持幂等", () => {

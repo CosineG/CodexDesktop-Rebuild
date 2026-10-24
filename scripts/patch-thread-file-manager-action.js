@@ -6,6 +6,8 @@
  * 26.901 又把侧边栏会话菜单拆到 app-primary，并仅为 Git 会话调用该菜单；
  * 26.908 将该限制移入派生选择器；26.911 又将菜单构造器移回 app-initial；
  * 26.1016 的远程连接状态改为读取独立 selector，不再内联配置项名称。
+ * 26.1021 将两类菜单移回 app-primary，bundle 也不再包含远程连接配置名；
+ * 因此按菜单内容定位目标，不固定 chunk 名称或依赖配置名残留。
  * 顶层入口复用工作区菜单的打开回调，保留工作树解析和失败提示；不能调用
  * 需要 ThreadScope 的文件预览函数，否则全局侧边栏会抛 Missing scope instance。
  * 本补丁先复用打开链路增加顶层入口，再按内容定位侧边栏菜单并放宽两种
@@ -36,15 +38,8 @@ const SIDEBAR_PATCHABLE_SIGNATURES = [
   "id:`archive-thread`",
   "id:`open-in-new-window`",
 ];
-const SIDEBAR_BUNDLE_SIGNATURES = [
-  "rename-thread",
-  "archive-thread",
-  "open-in-new-window",
-  "remote_control_connections",
-];
-
 function hasSidebarMenuSignatures(source) {
-  return SIDEBAR_BUNDLE_SIGNATURES.every((signature) =>
+  return SIDEBAR_PATCHABLE_SIGNATURES.every((signature) =>
     source.includes(signature),
   );
 }
@@ -628,6 +623,28 @@ function patchSidebarSource(source) {
   return { status: "patched", source: next };
 }
 
+function selectTargets(bundles) {
+  const platforms = [...new Set(bundles.map((bundle) => bundle.platform))];
+  return platforms.flatMap((platform) => {
+    const candidates = bundles.filter((bundle) => bundle.platform === platform);
+    const patchable = candidates.filter(({ source }) =>
+      source.includes(MARKER) || source.includes(LEGACY_MARKER) ||
+      PATCHABLE_SIGNATURES.every((signature) => source.includes(signature)),
+    );
+    const native = candidates.filter(({ source }) => hasNativeDirectAction(source));
+    // 无法识别时仍交给核心补丁报错，避免上游结构变化被当作成功跳过。
+    const openMenus = patchable.length > 0 ? patchable
+      : native.length > 0 ? native : candidates.slice(0, 1);
+    const sidebars = candidates.filter(({ source }) =>
+      source.includes(SIDEBAR_MARKER) || hasSidebarMenuSignatures(source),
+    );
+    return [
+      ...openMenus.map((target) => ({ ...target, patchKind: "open-menu" })),
+      ...sidebars.map((target) => ({ ...target, patchKind: "sidebar" })),
+    ];
+  });
+}
+
 function findTargets(platform) {
   const appInitialTargets = locateBundles({
     dir: "assets",
@@ -648,18 +665,7 @@ function findTargets(platform) {
       source: fs.readFileSync(target.path, "utf-8"),
     }));
 
-  const openMenuTargets = appInitialTargets.map((target) => ({
-    ...target,
-    patchKind: "open-menu",
-  }));
-  const sidebarTargets = [...appInitialTargets, ...appPrimaryTargets]
-    .filter(
-      ({ source }) =>
-        source.includes(SIDEBAR_MARKER) || hasSidebarMenuSignatures(source),
-    )
-    .map((target) => ({ ...target, patchKind: "sidebar" }));
-
-  return [...openMenuTargets, ...sidebarTargets];
+  return selectTargets([...appInitialTargets, ...appPrimaryTargets]);
 }
 
 function main() {
@@ -735,4 +741,5 @@ module.exports = {
   hasNativeDirectAction,
   patchSidebarSource,
   patchSource,
+  selectTargets,
 };
