@@ -140,22 +140,27 @@ function patchSource(source) {
   return { status: "patched", source: next, count: match.spreads.length };
 }
 
-function platformNames(platform) {
+function platformNames(platform, srcDir = SRC_DIR) {
   return platform
     ? [platform]
     : ["mac-arm64", "mac-x64", "win"].filter((name) =>
-        fs.existsSync(path.join(SRC_DIR, name, "_asar", ".vite", "build")),
+        fs.existsSync(path.join(srcDir, name, "_asar", ".vite", "build")),
       );
 }
 
-function locateTargets(platform) {
+/**
+ * 定位 app-server 参数 bundle；上游可能把同一模块拆进多个 chunk，全部都要补。
+ * 单个平台存在 build 目录但零命中时明确报错，避免静默漏补。
+ */
+function locateTargets(platform, srcDir = SRC_DIR) {
   const targets = [];
-  for (const name of platformNames(platform)) {
-    const buildDir = path.join(SRC_DIR, name, "_asar", ".vite", "build");
+  for (const name of platformNames(platform, srcDir)) {
+    const buildDir = path.join(srcDir, name, "_asar", ".vite", "build");
     if (!fs.existsSync(buildDir)) continue;
     const matches = fs
       .readdirSync(buildDir)
       .filter((file) => file.endsWith(".js"))
+      .sort()
       .map((file) => path.join(buildDir, file))
       .filter((file) => {
         const source = fs.readFileSync(file, "utf8");
@@ -165,12 +170,12 @@ function locateTargets(platform) {
           source.includes(APP_SERVER_FLAG)
         );
       });
-    if (matches.length !== 1) {
-      throw new Error(
-        `[${name}] expected one app-server argument bundle, found ${matches.length}`,
-      );
+    if (matches.length === 0) {
+      throw new Error(`[${name}] no app-server argument bundle found`);
     }
-    targets.push({ platform: name, path: matches[0], buildDir });
+    for (const filePath of matches) {
+      targets.push({ platform: name, path: filePath, buildDir });
+    }
   }
   return targets;
 }
@@ -215,10 +220,11 @@ function main() {
   }
 
   let changed = 0;
+  // 多个重复 bundle 共享同一 buildDir，runtime 文件只同步一次，避免重复计数。
+  const syncedBuildDirs = new Set();
   for (const target of targets) {
     const source = fs.readFileSync(target.path, "utf8");
     const result = patchSource(source);
-    const runtimeChanged = syncRuntimeFiles(target.buildDir, check);
     const label = `[${target.platform}] ${relPath(target.path)}`;
 
     if (result.status === "patched") {
@@ -237,6 +243,9 @@ function main() {
       );
     }
 
+    if (syncedBuildDirs.has(target.buildDir)) continue;
+    syncedBuildDirs.add(target.buildDir);
+    const runtimeChanged = syncRuntimeFiles(target.buildDir, check);
     if (runtimeChanged > 0) {
       changed += runtimeChanged;
       console.log(

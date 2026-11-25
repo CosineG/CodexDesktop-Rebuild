@@ -11,7 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { relPath, SRC_DIR } = require("./patch-util");
+const { listJavaScriptFiles, relPath, SRC_DIR } = require("./patch-util");
 
 const PLATFORM_NAMES = ["mac-arm64", "mac-x64", "win"];
 
@@ -213,10 +213,9 @@ function findTargets(platforms) {
       "webview",
       "assets",
     );
-    if (!fs.existsSync(assetsDir)) continue;
 
-    for (const file of fs.readdirSync(assetsDir)) {
-      if (!file.endsWith(".js")) continue;
+    // 递归扫描 assets，兼容上游把界面 chunk 移入 async 目录。
+    for (const file of listJavaScriptFiles(assetsDir)) {
       const filePath = path.join(assetsDir, file);
       const source = fs.readFileSync(filePath, "utf8");
       if (

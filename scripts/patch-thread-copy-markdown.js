@@ -6,11 +6,13 @@
  * 任何操作，且未挂载会话页面时前端没有历史订阅。复制显式请求完整历史，
  * 前端没有内容时从后台完整快照调用原生渲染器，包含子代理的父会话；空内容
  * 或剪贴板失败进入原生错误提示。只修改复制动作，不改变全局历史加载策略。
+ *
+ * 26.1120 起上游处理器已强制加载完整历史并自行解析父会话，此时只识别为 native。
  */
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { SRC_DIR, relPath } = require("./patch-util");
+const { listJavaScriptFiles, SRC_DIR, relPath } = require("./patch-util");
 
 const MARKER = "/* Codex：复制 Markdown 前加载完整会话，失败时显示原生提示。 */";
 const ERROR_ID = "threadActions.copyConversationMarkdown.copyConversationMarkdownError";
@@ -70,6 +72,62 @@ function nativeHelpers(ast, source) {
   return Object.fromEntries(Object.entries(found).map(([key, matches]) => [key, matches[0]]));
 }
 
+function isFunction(node) {
+  return node.type === "FunctionDeclaration" ||
+    node.type === "FunctionExpression" ||
+    node.type === "ArrowFunctionExpression";
+}
+
+/**
+ * 选中包含复制错误提示的最内层函数，即复制动作本体。
+ * .catch 里的错误提示回调只负责弹窗，不属于动作本体，需跳过；否则会误选外层包装函数。
+ * 同尺寸时取起点更靠后的函数，保证选择结果确定。返回 null 表示没有候选。
+ */
+function findCopyHandler(ast, source) {
+  const errorIndex = source.indexOf(ERROR_ID);
+  if (errorIndex < 0) return null;
+
+  let best = null;
+  const visit = (node, parent) => {
+    if (!node || typeof node !== "object") return;
+    if (node.type && isFunction(node) &&
+        node.start <= errorIndex && errorIndex < node.end) {
+      const isErrorCallback = parent?.type === "CallExpression" &&
+        parent.callee?.type === "MemberExpression" &&
+        name(parent.callee.property) === "catch" &&
+        parent.arguments?.[0] === node;
+      if (!isErrorCallback) {
+        const span = node.end - node.start;
+        const bestSpan = best ? best.end - best.start : Infinity;
+        if (!best || span < bestSpan || (span === bestSpan && node.start > best.start)) {
+          best = node;
+        }
+      }
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "type" || key === "start" || key === "end") continue;
+      const child = node[key];
+      if (Array.isArray(child)) child.forEach((item) => visit(item, node));
+      else if (child && typeof child === "object") visit(child, node);
+    }
+  };
+  visit(ast, null);
+  return best;
+}
+
+/**
+ * 上游 26.1120 起在复制处理器内强制加载完整历史并自行解析父会话。
+ * 只在动作本体上判断，避免外层模块包装函数里其他函数的同名调用造成误判。
+ */
+function hasNativeCopyHistory(ast, source) {
+  const handler = findCopyHandler(ast, source);
+  if (!handler) return false;
+  const body = source.slice(handler.start, handler.end);
+  return body.includes("ensureConversationHistoryLoaded(") &&
+    body.includes("{force:!0") &&
+    body.includes("getConversationAncestry(");
+}
+
 function patchSource(source) {
   if (!source.includes(ERROR_ID)) return { status: "not-applicable", source };
   let ast;
@@ -79,6 +137,8 @@ function patchSource(source) {
     return { status: "parse-error", source, error };
   }
   if (source.includes(MARKER)) return { status: "already-patched", source };
+  // 原生处理器已覆盖未打开会话的复制场景，不改写上游代码。
+  if (hasNativeCopyHistory(ast, source)) return { status: "native", source };
   const candidates = [];
   walk(ast, (node) => {
     if (node.type !== "FunctionDeclaration" || node.params.length !== 1) return;
@@ -159,9 +219,8 @@ function findTargets(platform) {
   const targets = [];
   for (const current of platforms) {
     const assets = path.join(SRC_DIR, current, "_asar", "webview", "assets");
-    if (!fs.existsSync(assets)) continue;
-    for (const file of fs.readdirSync(assets)) {
-      if (!file.endsWith(".js")) continue;
+    // 递归扫描 assets，兼容上游把界面 chunk 移入 async 目录。
+    for (const file of listJavaScriptFiles(assets)) {
       const target = path.join(assets, file);
       const source = fs.readFileSync(target, "utf8");
       if (source.includes(ERROR_ID)) targets.push({ path: target, source });
@@ -180,6 +239,8 @@ function main() {
     const result = patchSource(target.source);
     if (result.status === "already-patched") {
       console.log(`[ok] ${relPath(target.path)}: already patched`);
+    } else if (result.status === "native") {
+      console.log(`[ok] ${relPath(target.path)}: upstream loads full conversation history natively`);
     } else if (result.status === "patched") {
       if (!check) fs.writeFileSync(target.path, result.source, "utf8");
       console.log(`[${check ? "?" : "ok"}] ${relPath(target.path)}: ${check ? "would patch" : "patched"} conversation Markdown copy`);

@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { parse } = require("acorn");
-const { RUNTIME_DIRS, RUNTIME_FILES, assertNetworkPolicySupport, planRepair, applyRepair } = require("./repair-browser-runtime");
+const { RUNTIME_DIRS, assertNetworkPolicySupport, resolveServiceImplementation, planRepair, applyRepair } = require("./repair-browser-runtime");
 const { ROUTING_FILES, patchSource } = require("./patch-windows-browser-routing");
 
 const SERVICE = `class Preferences {
@@ -13,8 +13,32 @@ const SERVICE = `class Preferences {
 }
 class Client { attach(tab, policy) { return this.sendSessionRequest("attach", {tabId: tab, networkPolicy: policy}) } }
 class CDP { async attachTab(tab) { return this.api.attach(tab, await this.readNetworkPolicy()) } }`;
+const LAUNCHER = (current) => `export const revision = ${current ? 2 : 1};
+export const bootstrap = () => import("./browser-service-core.mjs");`;
 const SKILL = '---\nname: computer-use\ndescription: Control Windows apps\n---\n\n# Computer Use\n\n## Initialize\nconst { sky } = await import("@oai/sky");\n';
 const COMPUTER = 'Use an app from inventory.\nlet app = await cua.getApp("Example App");\n';
+
+// 与上游 26.1120 的实际布局保持一致：服务可能拆成启动器与核心，也可能只有客户端。
+const LAYOUTS = {
+  [RUNTIME_DIRS[0]]: ["browser-client.mjs", "browser-service.mjs", "browser-service-core.mjs",
+    "browser-accessibility.wasm.br", "zxing_reader.wasm"],
+  [RUNTIME_DIRS[1]]: ["browser-client.js", "browser-client.mjs"],
+  [RUNTIME_DIRS[2]]: ["browser-client.mjs", "browser-service.mjs",
+    "browser-accessibility.wasm.br", "zxing_reader.wasm"],
+  [RUNTIME_DIRS[3]]: ["browser-client.mjs"],
+};
+
+/** 按文件名和目录生成可区分的上游/目标内容。 */
+function runtimeContent(directory, name, current) {
+  if (name === "browser-service.mjs" || name === "browser-service-core.mjs") {
+    // 第一个入口是“瘦启动器 + 核心”，其他含服务的入口是单文件完整服务。
+    if (directory === RUNTIME_DIRS[0] && name === "browser-service.mjs") return LAUNCHER(current);
+    if (directory === RUNTIME_DIRS[0]) return current ? SERVICE : "export const legacy = true;";
+    return current ? SERVICE : "export const legacy = true;";
+  }
+  if (name.endsWith(".mjs") || name.endsWith(".js")) return `export const revision = ${current ? 2 : 1};`;
+  return Buffer.from(current ? [0, 2, 255] : [0, 1, 255]);
+}
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-repair-"));
@@ -24,10 +48,8 @@ function fixture(t) {
   for (const directory of RUNTIME_DIRS) {
     for (const [base, current] of [[sourceRoot, true], [resourcesRoot, false]]) {
       fs.mkdirSync(path.join(base, directory), { recursive: true });
-      for (const name of RUNTIME_FILES) {
-        const content = name === "browser-service.mjs" ? (current ? SERVICE : "export const legacy = true;")
-          : name.endsWith(".mjs") ? `export const revision = ${current ? 2 : 1};` : Buffer.from(current ? [0, 2, 255] : [0, 1, 255]);
-        fs.writeFileSync(path.join(base, directory, name), content);
+      for (const name of LAYOUTS[directory]) {
+        fs.writeFileSync(path.join(base, directory, name), runtimeContent(directory, name, current));
       }
     }
   }
@@ -59,12 +81,86 @@ test("检查模式只读，应用时成套同步、保留备份且可重复执�
   assert.equal(planRepair(options).length, 0);
 });
 
-test("最后一个入口缺少资源时，全部预检失败且不产生写入", (t) => {
+test("入口目录不含浏览器运行时文件时，全部预检失败且不产生写入", (t) => {
   const options = fixture(t);
   const before = planRepair(options);
-  fs.unlinkSync(path.join(options.sourceRoot, RUNTIME_DIRS.at(-1), "zxing_reader.wasm"));
-  assert.throws(() => planRepair(options), /ENOENT/);
+  const empty = path.join(options.sourceRoot, RUNTIME_DIRS.at(-1));
+  for (const name of fs.readdirSync(empty)) fs.unlinkSync(path.join(empty, name));
+  assert.throws(() => planRepair(options), /未发现可同步的浏览器运行时文件/);
   for (const item of before) assert.deepEqual(fs.readFileSync(item.file), item.before);
+});
+
+test("启动器加核心时解析到核心实现", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-service-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "browser-service.mjs"), LAUNCHER(true));
+  fs.writeFileSync(path.join(root, "browser-service-core.mjs"), SERVICE);
+  assert.equal(resolveServiceImplementation(root), path.join(root, "browser-service-core.mjs"));
+});
+
+test("只有启动器没有核心时拒绝解析", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-service-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "browser-service.mjs"), LAUNCHER(true));
+  assert.throws(() => resolveServiceImplementation(root, "launcher-only"), /networkPolicy/);
+});
+
+test("纯客户端目录没有服务实现", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-service-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "browser-client.mjs"), "export const revision = 2;");
+  assert.equal(resolveServiceImplementation(root), null);
+});
+
+test("服务文件被改名时明确失败而不是当作纯客户端目录", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-service-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "browser-action-service.js"), "export const revision = 2;");
+  fs.writeFileSync(path.join(root, "browser-service.js"), SERVICE);
+  assert.throws(() => resolveServiceImplementation(root, "renamed"), /未知的浏览器服务文件名.*browser-service\.js/);
+});
+
+test("旧安装缺少核心时新增安装，重复检查为空", (t) => {
+  const options = fixture(t);
+  for (const directory of RUNTIME_DIRS) {
+    fs.rmSync(path.join(options.resourcesRoot, directory, "browser-service-core.mjs"), { force: true });
+  }
+  const plan = planRepair(options);
+  const created = plan.filter((item) => item.before === null);
+  assert.deepEqual(created.map((item) => path.basename(item.file)), ["browser-service-core.mjs"]);
+
+  const backup = applyRepair(plan, path.join(options.root, "backups"));
+  const manifest = JSON.parse(fs.readFileSync(path.join(backup, "manifest.json")));
+  assert.equal(manifest.length, plan.length);
+  const createdManifest = manifest.find((item) => item.file === created[0].file);
+  assert.equal(createdManifest.backup, null);
+  assert.equal(createdManifest.beforeSha256, null);
+  assert.deepEqual(
+    fs.readFileSync(created[0].file),
+    fs.readFileSync(path.join(options.sourceRoot, RUNTIME_DIRS[0], "browser-service-core.mjs")),
+  );
+  assert.equal(planRepair(options).length, 0);
+});
+
+test("新增产物写入中途失败时连新增文件一起回滚", (t) => {
+  const options = fixture(t);
+  for (const directory of RUNTIME_DIRS) {
+    fs.rmSync(path.join(options.resourcesRoot, directory, "browser-service-core.mjs"), { force: true });
+  }
+  const plan = planRepair(options);
+  const [created] = plan.filter((item) => item.before === null);
+  assert.ok(created, "计划应包含新增的核心文件");
+  const lastFile = plan.at(-1).file;
+  assert.throws(() => applyRepair(plan, path.join(options.root, "backups"), (file, data) => {
+    fs.writeFileSync(file, data);
+    if (file === lastFile) throw new Error("模拟磁盘写入失败");
+  }), /已回滚/);
+
+  assert.equal(fs.existsSync(created.file), false);
+  for (const item of plan) {
+    if (item.before === null) continue;
+    assert.deepEqual(fs.readFileSync(item.file), item.before);
+  }
 });
 
 test("不把缺少策略读取或传递的旧运行时安装为修复", () => {
@@ -99,15 +195,27 @@ test("同步已安装插件缓存，不改其他插件和用户配置", (t) => {
   options.codexHome = path.join(options.root, "codex-home");
   const cache = path.join(options.codexHome, "plugins/cache/openai-bundled");
   fs.mkdirSync(cache, { recursive: true });
+  const versions = ["26.1016.51333", "26.1120.6357"];
   for (const plugin of ["browser", "chrome"]) {
-    fs.cpSync(path.join(options.resourcesRoot, `plugins/openai-bundled/plugins/${plugin}`),
-      path.join(cache, plugin, "26.1016.51333"), { recursive: true });
+    for (const version of versions) {
+      fs.cpSync(path.join(options.resourcesRoot, `plugins/openai-bundled/plugins/${plugin}`),
+        path.join(cache, plugin, version), { recursive: true });
+    }
   }
   fs.cpSync(path.join(options.resourcesRoot, "plugins/openai-bundled/plugins/computer-use"),
     path.join(cache, "computer-use/26.1016.51333"), { recursive: true });
   fs.writeFileSync(path.join(options.codexHome, "config.toml"), "existing-user-config");
   const plan = planRepair(options);
-  assert.equal(plan.filter((item) => item.file.startsWith(cache)).length, 9);
+  const cached = (plugin) => plan.filter((item) => item.file.startsWith(path.join(cache, plugin) + path.sep));
+  // browser 入口每版本 4 个文件、chrome 入口每版本 1 个；两个版本共 10 个。
+  for (const version of versions) {
+    const inVersion = (plugin) =>
+      plan.filter((item) => item.file.startsWith(path.join(cache, plugin, version) + path.sep)).length;
+    assert.equal(inVersion("browser"), 4);
+    assert.equal(inVersion("chrome"), 1);
+  }
+  assert.equal(cached("browser").length + cached("chrome").length, 10);
+  assert.equal(cached("computer-use").length, 1);
   applyRepair(plan, path.join(options.root, "backups"));
   assert.equal(planRepair(options).length, 0);
   assert.equal(fs.readFileSync(path.join(options.codexHome, "config.toml"), "utf8"), "existing-user-config");
@@ -126,8 +234,19 @@ test("技能修补保留原生工作流和换行，重复执行不追加内容",
 test("真实生成运行时向扩展传递原始策略，读取失败时终止 attach", async (t) => {
   const sourceRoot = path.join(__dirname, "../src/win");
   if (!fs.existsSync(sourceRoot)) return t.skip("未生成 Windows 上游资源");
+  const validated = [];
   for (const directory of RUNTIME_DIRS) {
-    const source = fs.readFileSync(path.join(sourceRoot, directory, "browser-service.mjs"), "utf8");
+    const dir = path.join(sourceRoot, directory);
+    const service = resolveServiceImplementation(dir);
+    if (!service) {
+      // 纯客户端目录没有服务实现，只确认客户端存在且可解析。
+      const client = path.join(dir, "browser-client.mjs");
+      assert.ok(fs.existsSync(client), `${directory}: 缺少 browser-client.mjs`);
+      parse(fs.readFileSync(client, "utf8"), { ecmaVersion: "latest", sourceType: "module" });
+      continue;
+    }
+    validated.push(directory);
+    const source = fs.readFileSync(service, "utf8");
     assertNetworkPolicySupport(source, directory);
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     let attach;
@@ -158,4 +277,6 @@ test("真实生成运行时向扩展传递原始策略，读取失败时终止 a
     cdp.api = { attach: () => assert.fail("策略读取失败后不应接管标签页") };
     await assert.rejects(cdp.attachTab(7, {}, () => true), /policy unavailable/);
   }
+  // 第 1 个入口经核心校验，第 3 个入口经单文件服务校验；两者都必须被覆盖。
+  assert.deepEqual(validated, [RUNTIME_DIRS[0], RUNTIME_DIRS[2]]);
 });

@@ -3,11 +3,13 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const zlib = require("node:zlib");
 const { parse } = require("acorn");
 
 const {
   TRANSLATIONS,
   patchSource,
+  patchLocaleCatalog,
   findTargets,
 } = require("./patch-reasoning-effort-labels");
 
@@ -102,4 +104,178 @@ test("关键消息缺失时失败，避免静默产生不完整补丁", () => {
       count: 0,
     },
   ]);
+});
+
+const GZIP_SUFFIX = ".json.codex-gzip";
+const ZH_GROUP = "4f006d52a0676d42";
+
+function readGzipJson(file) {
+  return JSON.parse(zlib.gunzipSync(fs.readFileSync(file)));
+}
+
+function writeGzipJson(file, value) {
+  fs.writeFileSync(file, zlib.gzipSync(Buffer.from(JSON.stringify(value), "utf8")));
+}
+
+/** 构建新版 locales 目录：共享 keys + zh-CN 译文 + 第二语言译文。 */
+function createGzipFixture(t, { group = ZH_GROUP } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-locales-gzip-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const locales = path.join(root, "win/_asar/webview/assets/locales");
+  fs.mkdirSync(locales, { recursive: true });
+
+  const keys = [
+    ...Object.keys(TRANSLATIONS),
+    "composer.mode.local.reasoning.persistent.label",
+    "unrelated.message",
+  ];
+  const zhValues = [
+    ...Object.keys(TRANSLATIONS).map((messageId) => `旧-${messageId}`),
+    "持续",
+    "无关消息'与\\转义",
+  ];
+  const twValues = zhValues.map((value) => `繁-${value}`);
+
+  const keysPath = path.join(locales, `keys.${ZH_GROUP}${GZIP_SUFFIX}`);
+  const zhPath = path.join(
+    locales,
+    `zh-CN.keys.${group}.abc123${GZIP_SUFFIX}`,
+  );
+  const twPath = path.join(
+    locales,
+    `zh-TW.keys.${ZH_GROUP}.def456${GZIP_SUFFIX}`,
+  );
+  writeGzipJson(keysPath, keys);
+  writeGzipJson(zhPath, zhValues);
+  writeGzipJson(twPath, twValues);
+
+  return { root, locales, keysPath, zhPath, twPath, keys, zhValues, twValues };
+}
+
+test("新版 gzip 语言目录只定位简体中文并补齐翻译", (t) => {
+  const fixture = createGzipFixture(t);
+  const found = findTargets("win", fixture.root);
+
+  assert.deepEqual(found.invalidPlatforms, []);
+  assert.equal(found.targets.length, 1);
+  assert.equal(found.targets[0].kind, "gzip");
+  assert.equal(path.basename(found.targets[0].path), path.basename(fixture.zhPath));
+  assert.equal(
+    path.basename(found.targets[0].keysPath),
+    `keys.${ZH_GROUP}${GZIP_SUFFIX}`,
+  );
+
+  const twBefore = fs.readFileSync(fixture.twPath);
+  const result = patchLocaleCatalog(
+    fs.readFileSync(fixture.zhPath),
+    fs.readFileSync(fixture.keysPath),
+  );
+
+  assert.equal(result.status, "patched");
+  assert.equal(result.patches.length, Object.keys(TRANSLATIONS).length);
+  fs.writeFileSync(fixture.zhPath, result.source);
+
+  // 只替换推理强度消息，其余消息与译文保持语义不变。
+  const patched = readGzipJson(fixture.zhPath);
+  assert.equal(patched.length, fixture.zhValues.length);
+  fixture.keys.forEach((messageId, index) => {
+    assert.equal(
+      patched[index],
+      Object.hasOwn(TRANSLATIONS, messageId)
+        ? TRANSLATIONS[messageId]
+        : fixture.zhValues[index],
+    );
+  });
+
+  const idempotent = patchLocaleCatalog(
+    fs.readFileSync(fixture.zhPath),
+    fs.readFileSync(fixture.keysPath),
+  );
+  assert.equal(idempotent.status, "already-patched");
+  // 第二语言文件完全未被触及。
+  assert.ok(fs.readFileSync(fixture.twPath).equals(twBefore));
+});
+
+test("keys 组哈希不匹配时回退到含目标消息的 keys 目录", (t) => {
+  const fixture = createGzipFixture(t, { group: "deadbeefdeadbeef" });
+  const found = findTargets("win", fixture.root);
+
+  assert.deepEqual(found.invalidPlatforms, []);
+  assert.equal(found.targets.length, 1);
+  assert.equal(
+    path.basename(found.targets[0].keysPath),
+    `keys.${ZH_GROUP}${GZIP_SUFFIX}`,
+  );
+});
+
+test("新版 gzip 语言目录缺少关键消息时失败", (t) => {
+  const fixture = createGzipFixture(t);
+  const removeId = "composer.mode.local.reasoning.max.label";
+  const indexes = fixture.keys
+    .map((messageId, index) => ({ messageId, index }))
+    .filter(({ messageId }) => messageId !== removeId);
+
+  writeGzipJson(
+    fixture.keysPath,
+    indexes.map(({ messageId }) => messageId),
+  );
+  writeGzipJson(
+    fixture.zhPath,
+    indexes.map(({ index }) => fixture.zhValues[index]),
+  );
+
+  const result = patchLocaleCatalog(
+    fs.readFileSync(fixture.zhPath),
+    fs.readFileSync(fixture.keysPath),
+  );
+
+  assert.equal(result.status, "unexpected-entry-count");
+  assert.deepEqual(result.invalidEntries, [{ messageId: removeId, count: 0 }]);
+});
+
+test("keys 与译文长度不一致时按对齐异常失败", (t) => {
+  const fixture = createGzipFixture(t);
+  const misaligned = fixture.zhValues.slice(0, -1);
+  writeGzipJson(fixture.zhPath, misaligned);
+
+  const result = patchLocaleCatalog(
+    fs.readFileSync(fixture.zhPath),
+    fs.readFileSync(fixture.keysPath),
+  );
+
+  assert.equal(result.status, "unexpected-entry-count");
+  assert.deepEqual(result.invalidEntries, [
+    { messageId: "locale catalog alignment", count: misaligned.length },
+  ]);
+});
+
+test("目标译文不是字符串时失败而不是写入语言包", (t) => {
+  const fixture = createGzipFixture(t);
+  const messageId = "composer.mode.local.reasoning.none.label";
+  const values = [...fixture.zhValues];
+  values[fixture.keys.indexOf(messageId)] = 42;
+  writeGzipJson(fixture.zhPath, values);
+
+  const result = patchLocaleCatalog(
+    fs.readFileSync(fixture.zhPath),
+    fs.readFileSync(fixture.keysPath),
+  );
+
+  assert.equal(result.status, "unexpected-entry-count");
+  assert.deepEqual(result.invalidEntries, [
+    { messageId, count: 1, nonString: true },
+  ]);
+});
+
+test("损坏的语言目录字节按解析失败处理", (t) => {
+  const fixture = createGzipFixture(t);
+  fs.writeFileSync(fixture.zhPath, Buffer.from("not a gzip catalog"));
+
+  const result = patchLocaleCatalog(
+    fs.readFileSync(fixture.zhPath),
+    fs.readFileSync(fixture.keysPath),
+  );
+
+  assert.equal(result.status, "parse-failed");
+  assert.ok(result.error instanceof Error);
 });

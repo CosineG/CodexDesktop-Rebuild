@@ -1,7 +1,18 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
-const { patchSource } = require("./patch-browser-auth");
+const { locateTargets, patchSource } = require("./patch-browser-auth");
+
+const NATIVE_CORE_SOURCE =
+  "class Preferences{constructor(config){this.config=config}async getExtensionRequestHeaders(){return(await this.config.readRequirements())?.requirements?.browserUse?.extension?.requestHeaders}}";
+const LAUNCHER_SOURCE = [
+  'var y="./browser-service-core.mjs",i=()=>import(y);',
+  "async function handleRpc(t){return(await i()).handleRpc(t)}",
+  "export{handleRpc};",
+].join("");
 
 function createService(identityPromise, gateValue = true) {
   return [
@@ -48,7 +59,7 @@ test("未知上游结构会明确失败而不是静默漏补", () => {
 });
 
 test("新版直接读取组织请求头无需身份认证，并保留策略读取失败", async () => {
-  const source = "class Preferences{constructor(config){this.config=config}async getExtensionRequestHeaders(){return(await this.config.readRequirements())?.requirements?.browserUse?.extension?.requestHeaders}}";
+  const source = NATIVE_CORE_SOURCE;
   const result = patchSource(source);
   assert.equal(result.status, "native");
   assert.equal(result.source, source);
@@ -58,4 +69,56 @@ test("新版直接读取组织请求头无需身份认证，并保留策略读�
   assert.deepEqual(await configured.getExtensionRequestHeaders(), headers);
   assert.equal(await new Preferences({ readRequirements: async () => null }).getExtensionRequestHeaders(), undefined);
   await assert.rejects(new Preferences({ readRequirements: async () => { throw new Error("policy unavailable"); } }).getExtensionRequestHeaders(), /policy unavailable/);
+});
+
+test("新版 launcher 不含 caller-identity 闸门时标记 not-applicable", () => {
+  assert.equal(patchSource(LAUNCHER_SOURCE).status, "not-applicable");
+  assert.equal(patchSource(NATIVE_CORE_SOURCE).status, "native");
+});
+
+test("无闸门且非启动器的结构明确失败", () => {
+  const source = "export const config={revision:2};export function handleRpc(){return null}";
+  assert.equal(patchSource(source).status, "unexpected-shape");
+});
+
+test("原生实现允许空白差异", () => {
+  const source = [
+    "class Preferences {",
+    "  constructor(config) { this.config = config }",
+    "  async   getExtensionRequestHeaders( ) {",
+    "    return ( await this.config.readRequirements( ) )?.requirements?.browserUse?.extension?.requestHeaders",
+    "  }",
+    "}",
+  ].join("\n");
+  assert.equal(patchSource(source).status, "native");
+});
+
+test("递归定位浏览器 runtime，同时发现核心实现与 launcher", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-browser-auth-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const cuaDir = path.join(
+    root,
+    "win/cua_node/lib/node_modules/@oai/browser-desktop/scripts",
+  );
+  const pluginDir = path.join(
+    root,
+    "win/plugins/openai-bundled/plugins/browser/scripts",
+  );
+  fs.mkdirSync(cuaDir, { recursive: true });
+  fs.mkdirSync(pluginDir, { recursive: true });
+  fs.writeFileSync(path.join(cuaDir, "browser-service.mjs"), LAUNCHER_SOURCE);
+  fs.writeFileSync(path.join(cuaDir, "browser-service-core.mjs"), NATIVE_CORE_SOURCE);
+  fs.writeFileSync(path.join(pluginDir, "browser-service.mjs"), NATIVE_CORE_SOURCE);
+
+  const targets = locateTargets("win", root);
+
+  assert.deepEqual(
+    targets.map((target) => path.basename(target.path)),
+    ["browser-service-core.mjs", "browser-service.mjs", "browser-service.mjs"],
+  );
+  assert.deepEqual(
+    targets.map((target) => patchSource(fs.readFileSync(target.path, "utf8")).status),
+    ["native", "not-applicable", "native"],
+  );
 });

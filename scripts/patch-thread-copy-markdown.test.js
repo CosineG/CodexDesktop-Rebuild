@@ -138,3 +138,39 @@ test("无关或无法解析的文件不修改", () => {
   assert.equal(patchSource("const unrelated = true;").status, "not-applicable");
   assert.equal(patchSource(fixture + "(").status, "parse-error");
 });
+
+// 26.1120 原生处理器：自己强制加载完整历史并解析父会话，无需前端回退。
+const nativeHandlerFixture = "function copyNative({scope:e,conversationId:t,parentConversationId:n,getMarkdown:s,intl:o}){" +
+  "(async()=>{let r=(0,client)(e);await r.ensureConversationHistoryLoaded(t,null==n?[]:[n],{force:!0});let i=n;" +
+  "if(void 0===i){let a=await r.getConversationAncestry(t);i=a?.parentThreadId??null}" +
+  "let l=await s();null!=l&&await write(l)&&e.get(toasts).success(o.formatMessage(q.copyConversationMarkdownSuccess))})" +
+  ".catch(()=>{e.get(toasts).danger(o.formatMessage({id:'threadActions.copyConversationMarkdown.copyConversationMarkdownError'}))})}";
+
+test("原生处理器强制加载完整历史并解析父会话时不再改写", () => {
+  const result = patchSource(nativeHandlerFixture);
+  assert.equal(result.status, "native");
+  assert.equal(result.source, nativeHandlerFixture);
+  assert.equal(result.source.includes(MARKER), false);
+});
+
+test("缺少原生父会话解析时仍走旧补丁路径", () => {
+  const withoutAncestry = nativeHandlerFixture.replace("let a=await r.getConversationAncestry(t);", "let a=null;");
+  const result = patchSource(withoutAncestry);
+  assert.equal(result.status, "unsupported-structure");
+  assert.equal(result.source, withoutAncestry);
+});
+
+// 复制处理器本身没有强制加载/父会话解析，只有外层包装函数的其他函数具备这些调用。
+const wrapperFixture = "function moduleWrapper(){" +
+  "async function loadAncestry(t){await client.ensureConversationHistoryLoaded(t,[],{force:!0});return client.getConversationAncestry(t)}" +
+  "function copy({scope:e,conversationId:t,parentConversationId:n,getMarkdown:s,intl:o}){" +
+  "(async()=>{await manager(t);let l=await s();l&&await write(l)&&e.get(toasts).success(o.formatMessage(q.copyConversationMarkdownSuccess))})" +
+  ".catch(()=>{e.get(toasts).danger(o.formatMessage({id:'threadActions.copyConversationMarkdown.copyConversationMarkdownError'}))})}" +
+  "return{copy,loadAncestry}}";
+
+test("外层包装函数里的原生调用不会让复制处理器被误判为 native", () => {
+  const result = patchSource(wrapperFixture);
+  assert.notEqual(result.status, "native");
+  assert.equal(result.status, "unsupported-structure");
+  assert.equal(result.source, wrapperFixture);
+});

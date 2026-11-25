@@ -5,7 +5,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { SRC_DIR, relPath } = require("./patch-util");
+const { listJavaScriptFiles, SRC_DIR, relPath } = require("./patch-util");
 
 const MARKER = "/* Codex：模型目录忽略服务端 allowlist。 */";
 
@@ -112,41 +112,59 @@ function patchSource(source) {
   return { status: "patched", source: next, patches };
 }
 
-function getPlatforms(platform) {
+function getPlatforms(platform, srcDir) {
   if (platform) return [platform];
   return ["mac-arm64", "mac-x64", "win"].filter((item) =>
-    fs.existsSync(path.join(SRC_DIR, item, "_asar", "webview", "assets")),
+    fs.existsSync(path.join(srcDir, item, "_asar", "webview", "assets")),
   );
 }
 
-function findTargets(platform) {
+/**
+ * 定位模型目录补丁目标。
+ * 预筛命中但无法改写（或已不是 allowlist 条件）的候选进入 dropped，交由入口明确报错。
+ * @param {string} [platform] 限定平台；省略时扫描全部可用平台
+ * @param {{ srcDir?: string }} [options] srcDir 供回归测试使用独立目录
+ * @returns {{ targets: Array<{platform: string, path: string, result: object}>, dropped: Array<{platform: string, path: string, status: string, count?: number}> }}
+ */
+function findTargets(platform, { srcDir = SRC_DIR } = {}) {
   const targets = [];
-  for (const currentPlatform of getPlatforms(platform)) {
+  const dropped = [];
+  for (const currentPlatform of getPlatforms(platform, srcDir)) {
     const assetsDir = path.join(
-      SRC_DIR,
+      srcDir,
       currentPlatform,
       "_asar",
       "webview",
       "assets",
     );
-    if (!fs.existsSync(assetsDir)) continue;
 
-    for (const file of fs.readdirSync(assetsDir)) {
-      if (!file.endsWith(".js")) continue;
+    // 递归扫描 assets，兼容上游把界面 chunk 移入 async 目录。
+    for (const file of listJavaScriptFiles(assetsDir)) {
       const filePath = path.join(assetsDir, file);
       const source = fs.readFileSync(filePath, "utf-8");
-      if (
-        source.includes("availableModels") &&
-        source.includes("useHiddenModels") &&
-        source.includes(".hidden") &&
-        // 仅调用公共过滤器的 chunk 不是补丁目标；必须存在模型成员的 allowlist 判断。
-        (/\.has\([\w$]+\.model\)/.test(source) || source.includes(MARKER))
-      ) {
-        targets.push({ platform: currentPlatform, path: filePath, source });
+      // 预筛：已打标记，或存在模型成员的 allowlist 判断；仅调用公共过滤器的 chunk 不是目标。
+      const candidate = source.includes(MARKER) ||
+        (source.includes("availableModels") &&
+          source.includes("useHiddenModels") &&
+          source.includes(".hidden") &&
+          /\.has\([\w$]+\.model\)/.test(source));
+      if (!candidate) continue;
+      // 只有能真正改写（或已改写）的 chunk 才算目标，避免仅提及字段的调用方报错。
+      const result = patchSource(source);
+      if (result.status === "patched" || result.status === "already-patched") {
+        targets.push({ platform: currentPlatform, path: filePath, result });
+      } else {
+        // 通过预筛却不再匹配 allowlist 条件，说明上游结构已漂移，必须让构建失败。
+        dropped.push({
+          platform: currentPlatform,
+          path: filePath,
+          status: result.status,
+          ...(result.count == null ? {} : { count: result.count }),
+        });
       }
     }
   }
-  return targets;
+  return { targets, dropped };
 }
 
 function main() {
@@ -155,28 +173,32 @@ function main() {
   const platform = args.find((item) =>
     ["mac-arm64", "mac-x64", "win"].includes(item),
   );
-  const targets = findTargets(platform);
+  const { targets, dropped } = findTargets(platform);
+
+  for (const item of dropped) {
+    console.log(
+      `  [!] ${relPath(item.path)}: ${item.status}（候选已不再匹配 allowlist 条件）`,
+    );
+  }
 
   if (targets.length === 0) {
+    if (dropped.length > 0) {
+      console.log(
+        `  [x] No patchable model catalog allowlist gate found (${dropped.length} candidate(s) rejected)`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     console.log("  [skip] No model catalog filter bundle found");
     return;
   }
 
   let changed = 0;
-  let failed = 0;
   for (const target of targets) {
     const label = relPath(target.path);
-    const result = patchSource(target.source);
+    const result = target.result;
     if (result.status === "already-patched") {
       console.log(`  [ok] ${label}: already patched`);
-      continue;
-    }
-    if (result.status !== "patched") {
-      console.log(
-        `  [x] ${label}: ${result.status}` +
-          (result.count == null ? "" : ` (anchors: ${result.count})`),
-      );
-      failed++;
       continue;
     }
 
@@ -196,7 +218,6 @@ function main() {
   console.log(
     `  [done] ${isCheck ? "would patch" : "patched"} ${changed} file(s)`,
   );
-  if (failed > 0) process.exitCode = 1;
 }
 
 if (require.main === module) main();

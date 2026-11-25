@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 将已生成的 Windows Browser Use 运行时同步到指定安装目录和可选插件缓存。
- * 客户端、服务端及 WASM 资源成套更新；全部预检后备份，失败时回滚本次写入。
+ * 客户端、启动器、服务核心及 WASM 资源按上游实际布局逐项更新；全部预检后备份，失败时回滚本次写入。
  * 不修改 CLI、原生 helper、认证、网站策略或扩展本身。
  *
  * node scripts/repair-browser-runtime.js --resources <安装目录/resources> [--codex-home <目录>] [--check]
@@ -20,9 +20,12 @@ const RUNTIME_DIRS = [
   "plugins/openai-bundled/plugins/chrome/scripts",
 ];
 const RUNTIME_FILES = [
-  "browser-client.mjs", "browser-service.mjs",
+  "browser-client.mjs", "browser-client.js",
+  "browser-service.mjs", "browser-service-core.mjs",
   "browser-accessibility.wasm.br", "zxing_reader.wasm",
 ];
+// 上游把服务拆成启动器和核心；启动器可能是无协议的瘦壳，需要继续查找核心。
+const SERVICE_FILES = ["browser-service.mjs", "browser-service-core.mjs"];
 
 function walk(node, visit) {
   if (!node?.type) return;
@@ -55,28 +58,72 @@ function assertNetworkPolicySupport(source, label) {
   }
 }
 
+/**
+ * 找到真正实现 networkPolicy 协议的服务文件。
+ * 先查 browser-service.mjs，再查 browser-service-core.mjs；都没有且目录内也没有服务样式的文件时
+ * 说明是纯客户端目录，返回 null；发现改名的服务文件则明确报错，避免静默漏装。
+ * @param {string} sourceDirectory 上游运行时目录
+ * @param {string} [label] 报错时展示的目录标签
+ * @returns {string | null} 通过协议校验的服务文件路径
+ */
+function resolveServiceImplementation(sourceDirectory, label = sourceDirectory) {
+  const candidates = SERVICE_FILES
+    .map((name) => path.join(sourceDirectory, name))
+    .filter((file) => fs.existsSync(file));
+  if (candidates.length === 0) {
+    // 上游若再次改名，不能把真正的服务文件当作纯客户端目录静默跳过。
+    const unknown = fs.existsSync(sourceDirectory)
+      ? fs
+          .readdirSync(sourceDirectory)
+          .filter((name) => /^browser-service.*\.(?:mjs|js)$/.test(name))
+      : [];
+    if (unknown.length > 0) {
+      throw new Error(
+        `${label}: 发现未知的浏览器服务文件名（${unknown.join(", ")}），请先同步匹配的上游运行时`,
+      );
+    }
+    return null;
+  }
+  const failures = [];
+  for (const file of candidates) {
+    try {
+      assertNetworkPolicySupport(fs.readFileSync(file, "utf8"), label);
+      return file;
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length === 1) throw failures[0];
+  throw new AggregateError(failures, `${label}: 缺少完整 networkPolicy 协议，请先同步兼容的上游资源`);
+}
+
 function planRepair({ sourceRoot = path.join(SRC_DIR, "win"), resourcesRoot, codexHome }) {
   if (!resourcesRoot) throw new Error("必须指定 --resources");
   const plan = [];
   const validated = new Set();
   function addDirectory(sourceDirectory, destinationDirectory) {
-    const service = path.join(sourceDirectory, "browser-service.mjs");
-    if (!validated.has(service)) {
-      assertNetworkPolicySupport(fs.readFileSync(service, "utf8"), service);
-      validated.add(service);
+    // 上游各目录布局不同，只同步实际存在的已知产物，不要求六件套齐全。
+    const files = RUNTIME_FILES.filter((name) => fs.existsSync(path.join(sourceDirectory, name)));
+    if (files.length === 0) throw new Error(`未发现可同步的浏览器运行时文件：${sourceDirectory}`);
+    // 安装入口目录必须已存在；目录内缺失的产物按新增处理，允许补进较旧的安装。
+    if (!fs.existsSync(destinationDirectory)) {
+      throw new Error(`未发现浏览器运行时安装入口：${destinationDirectory}`);
     }
-    const files = [...RUNTIME_FILES];
-    if (fs.existsSync(path.join(sourceDirectory, "browser-client.js"))) files.push("browser-client.js");
+    // 只有存在服务文件时才校验协议；纯客户端目录（如 chrome 插件）没有可校验的协议。
+    if (!SERVICE_FILES.some((name) => validated.has(path.join(sourceDirectory, name)))) {
+      const service = resolveServiceImplementation(sourceDirectory);
+      if (service) validated.add(service);
+    }
     for (const name of files) {
       const source = path.join(sourceDirectory, name);
       const file = path.join(destinationDirectory, name);
       const data = fs.readFileSync(source);
-      // 不创建不存在的安装入口，防止路径错误变成一次不完整安装。
-      const before = fs.readFileSync(file);
+      // 旧安装可能还没有上游新增的产物（如拆分后的 core），此时 before 为 null 表示 CREATE。
+      const before = fs.existsSync(file) ? fs.readFileSync(file) : null;
       if (name.endsWith(".mjs") || name.endsWith(".js")) {
         parse(data.toString("utf8"), { ecmaVersion: "latest", sourceType: "module" });
       }
-      if (!data.equals(before)) plan.push({ file, data, before });
+      if (before === null || !data.equals(before)) plan.push({ file, data, before });
     }
   }
   for (const directory of RUNTIME_DIRS) {
@@ -113,14 +160,22 @@ function applyRepair(plan, backupRoot, write = fs.writeFileSync) {
   if (plan.length === 0) return null;
   // 先检查计划是否过期，再保存全部旧内容；备份失败时不会触碰目标。
   for (const item of plan) {
+    // 新增文件没有旧内容可比对，目录存在性已在计划阶段校验。
+    if (item.before === null) continue;
     if (!fs.readFileSync(item.file).equals(item.before)) throw new Error(`目标已变化，请重新检查：${item.file}`);
   }
   fs.mkdirSync(backupRoot, { recursive: true });
   const backup = fs.mkdtempSync(path.join(backupRoot, "browser-"));
   const manifest = plan.map((item, index) => {
-    const name = `${index}.bak`;
-    fs.writeFileSync(path.join(backup, name), item.before);
-    return { file: item.file, backup: name, beforeSha256: sha256(item.before), afterSha256: sha256(item.data) };
+    // 新增文件无备份内容，用 null 记录，回滚时删除而不是写回 null。
+    const name = item.before === null ? null : `${index}.bak`;
+    if (name) fs.writeFileSync(path.join(backup, name), item.before);
+    return {
+      file: item.file,
+      backup: name,
+      beforeSha256: item.before === null ? null : sha256(item.before),
+      afterSha256: sha256(item.data),
+    };
   });
   fs.writeFileSync(path.join(backup, "manifest.json"), JSON.stringify(manifest, null, 2));
   const touched = [];
@@ -133,7 +188,13 @@ function applyRepair(plan, backupRoot, write = fs.writeFileSync) {
   } catch (error) {
     const rollbackErrors = [];
     for (const item of touched.reverse()) {
-      try { fs.writeFileSync(item.file, item.before); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+      try {
+        if (item.before === null) {
+          if (fs.existsSync(item.file)) fs.unlinkSync(item.file);
+        } else {
+          fs.writeFileSync(item.file, item.before);
+        }
+      } catch (rollbackError) { rollbackErrors.push(rollbackError); }
     }
     throw new AggregateError([error, ...rollbackErrors], `浏览器修复失败；${rollbackErrors.length ? "部分回滚失败" : "已回滚"}；备份：${backup}`);
   }
@@ -157,4 +218,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { RUNTIME_DIRS, RUNTIME_FILES, assertNetworkPolicySupport, planRepair, applyRepair };
+module.exports = { RUNTIME_DIRS, RUNTIME_FILES, assertNetworkPolicySupport, resolveServiceImplementation, planRepair, applyRepair };

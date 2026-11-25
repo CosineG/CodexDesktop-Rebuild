@@ -89,6 +89,17 @@ test("识别上游原生归档会话删除功能", () => {
     "thread/delete",
   ].join("|");
   assert.equal(hasNativeArchiveDelete(currentSource), true);
+
+  // 26.1120 原生链路使用 deleteWithTitle，不再导出 showDeleteButton。
+  const source1120 = [
+    "delete-archived-conversations",
+    "deleteArchivedConversation",
+    "deleteAllArchivedConversations",
+    "thread/delete",
+    "settings.dataControls.archivedChats.deleteWithTitle",
+  ].join("|");
+  assert.equal(hasNativeArchiveDelete(source1120), true);
+  assert.equal(hasNativeArchiveDelete(source1120.replace("thread/delete", "thread/archive")), false);
 });
 
 test("主进程入口兼容 bootstrap 与哈希 main 文件", () => {

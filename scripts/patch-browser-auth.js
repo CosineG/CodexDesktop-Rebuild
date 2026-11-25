@@ -122,12 +122,33 @@ function applyPatches(source, patches) {
   return next;
 }
 
+// 新版原生实现直接从 configRequirements 读取托管请求头，不依赖 caller identity。
+const NATIVE_HEADERS_SHAPE =
+  /asyncgetExtensionRequestHeaders\(\)\{return\(awaitthis\.config\.readRequirements\(\)\)\?\.requirements\?\.browserUse\?\.extension\?\.requestHeaders\}/;
+
+/** 忽略空白差异识别原生实现，避免格式化或压缩风格变化导致误报。 */
+function isNativeCore(source) {
+  return !source.includes(IDENTITY_ERROR) &&
+    NATIVE_HEADERS_SHAPE.test(source.replace(/\s+/g, ""));
+}
+
+/** 瘦启动器只动态导入核心，本身没有闸门；必须有导入证据才算可跳过。 */
+function isThinLauncher(source) {
+  if (source.includes(IDENTITY_ERROR)) return false;
+  if (!source.includes("browser-service-core.mjs")) return false;
+  return /\bimport\s*\(/.test(source);
+}
+
 function patchSource(source) {
   if (!source.includes(REQUEST_HEADER_GATE)) {
-    if (/async getExtensionRequestHeaders\(\)\{return\(await this\.config\.readRequirements\(\)\)\?\.requirements\?\.browserUse\?\.extension\?\.requestHeaders\}/.test(source)) {
+    if (isNativeCore(source)) {
       return { status: "native", source, count: 0 };
     }
-    return { status: "not-applicable", source, count: 0 };
+    // 只有确认是加载核心的瘦壳才允许跳过；其他无闸门结构一律按未知结构失败。
+    if (isThinLauncher(source)) {
+      return { status: "not-applicable", source, count: 0 };
+    }
+    return { status: "unexpected-shape", source, count: 0 };
   }
 
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
@@ -150,6 +171,11 @@ function patchSource(source) {
   return { status: "patched", source: next, count: patches.length };
 }
 
+const BROWSER_SERVICE_FILENAMES = new Set([
+  "browser-service.mjs",
+  "browser-service-core.mjs",
+]);
+
 function findBrowserServices(root) {
   if (!fs.existsSync(root)) return [];
   const results = [];
@@ -160,7 +186,7 @@ function findBrowserServices(root) {
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
         pending.push(fullPath);
-      } else if (entry.isFile() && entry.name === "browser-service.mjs") {
+      } else if (entry.isFile() && BROWSER_SERVICE_FILENAMES.has(entry.name)) {
         results.push(fullPath);
       }
     }
@@ -168,22 +194,25 @@ function findBrowserServices(root) {
   return results;
 }
 
-function locateTargets(platform) {
+function locateTargets(platform, srcDir = SRC_DIR) {
   const platforms = platform
     ? [platform]
     : ["mac-arm64", "mac-x64", "win"].filter((name) =>
-        fs.existsSync(path.join(SRC_DIR, name)),
+        fs.existsSync(path.join(srcDir, name)),
       );
   const targets = [];
+  const seen = new Set();
 
   for (const name of platforms) {
     const roots = [
-      path.join(SRC_DIR, name, "plugins"),
-      path.join(SRC_DIR, name, "cua_node"),
+      path.join(srcDir, name, "plugins"),
+      path.join(srcDir, name, "cua_node"),
     ];
     for (const root of roots) {
       for (const filePath of findBrowserServices(root)) {
         // 每一份真实 runtime 都必须识别为旧版可修补或新版原生支持，不能因锚点消失漏检。
+        if (seen.has(filePath)) continue;
+        seen.add(filePath);
         targets.push({ platform: name, path: filePath });
       }
     }
@@ -208,14 +237,22 @@ function main() {
   let patched = 0;
   let alreadyPatched = 0;
   let native = 0;
+  let skipped = 0;
   for (const target of targets) {
     const source = fs.readFileSync(target.path, "utf8");
     const result = patchSource(source);
     const label = `[${target.platform}] ${relPath(target.path)}`;
 
     if (result.status === "native") {
-      console.log(`[ok] ${label}: upstream reads managed headers without caller identity`);
+      console.log(`[ok] ${label}: native core reads managed headers without caller identity`);
       native++;
+      continue;
+    }
+
+    if (result.status === "not-applicable") {
+      // 新版 launcher 只动态导入 core，本身不再包含 caller-identity 闸门。
+      console.log(`[skip] ${label}: launcher without caller-identity gate`);
+      skipped++;
       continue;
     }
 
@@ -239,7 +276,7 @@ function main() {
   }
 
   console.log(
-    `[ok] Browser auth targets: ${targets.length}, patched: ${patched}, already: ${alreadyPatched}, native: ${native}`,
+    `[ok] Browser auth targets: ${targets.length}, patched: ${patched}, already: ${alreadyPatched}, native: ${native}, skipped: ${skipped}`,
   );
 }
 

@@ -10,11 +10,13 @@
  * message router, which permanently removes the thread (DB + rollout file).
  *
  * 回退注入要求最终打包的 CLI 支持 thread/delete。
- * 26.803 起上游已提供单条、按项目及全部删除；检测到完整原生链路时不再注入。
+ * 26.803 起上游已提供单条、按项目及全部删除；按内容递归扫描 assets 检测到
+ * 完整原生链路时不再注入，注入层仍按旧文件名定位。
  */
 const fs = require("fs");
+const path = require("path");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { listJavaScriptFiles, locateBundles, relPath, SRC_DIR } = require("./patch-util");
 
 function hasNativeArchiveDelete(code) {
   const legacyMarkers = [
@@ -32,20 +34,50 @@ function hasNativeArchiveDelete(code) {
     "showDeleteButton",
     "thread/delete",
   ];
-  return [legacyMarkers, currentMarkers].some((markers) =>
+  // 26.1120：数据控件改用 deleteWithTitle，且不再导出 showDeleteButton。
+  const current1120Markers = [
+    "delete-archived-conversations",
+    "deleteArchivedConversation",
+    "deleteAllArchivedConversations",
+    "thread/delete",
+    "settings.dataControls.archivedChats.deleteWithTitle",
+  ];
+  return [legacyMarkers, currentMarkers, current1120Markers].some((markers) =>
     markers.every((marker) => code.includes(marker)),
   );
+}
+
+/**
+ * 递归扫描 assets，按内容识别已原生支持删除的 chunk。
+ * @param {string[]} platforms 需要检查的平台
+ * @param {{ srcDir?: string }} [options] srcDir 供回归测试使用独立目录
+ * @returns {Array<{platform: string, path: string}>}
+ */
+function findNativeBundles(platforms, { srcDir = SRC_DIR } = {}) {
+  const bundles = [];
+  for (const platform of platforms) {
+    const assetsDir = path.join(srcDir, platform, "_asar", "webview", "assets");
+    for (const file of listJavaScriptFiles(assetsDir)) {
+      const filePath = path.join(assetsDir, file);
+      const code = fs.readFileSync(filePath, "utf-8");
+      if (hasNativeArchiveDelete(code)) bundles.push({ platform, path: filePath });
+    }
+  }
+  return bundles;
 }
 
 // ─── Layer 1: app-main route injection ──────────────────────────
 
 function patchAppMain(bundles, isCheck) {
   let patched = 0;
+  // 记录已具备删除路由的平台（含此前已注入），供入口做完整性判定。
+  const platforms = new Set();
   for (const bundle of bundles) {
     const code = fs.readFileSync(bundle.path, "utf-8");
 
     if (code.includes("delete-conversation")) {
       console.log(`  [ok] ${relPath(bundle.path)}: route already patched`);
+      platforms.add(bundle.platform);
       continue;
     }
 
@@ -74,26 +106,31 @@ function patchAppMain(bundles, isCheck) {
       console.log(
         `  [?] ${relPath(bundle.path)}: would inject delete-conversation route (wrapper=${wrapperFn})`,
       );
+      platforms.add(bundle.platform);
       patched++;
       continue;
     }
 
     fs.writeFileSync(bundle.path, newCode);
     console.log(`  [ok] ${relPath(bundle.path)}: injected delete-conversation route (wrapper=${wrapperFn})`);
+    platforms.add(bundle.platform);
     patched++;
   }
-  return patched;
+  return { total: patched, platforms };
 }
 
 // ─── Layer 2: data-controls delete button injection ─────────────
 
 function patchDataControls(bundles, isCheck) {
   let patched = 0;
+  // 记录已具备删除按钮的平台（含此前已注入），供入口做完整性判定。
+  const platforms = new Set();
   for (const bundle of bundles) {
     const code = fs.readFileSync(bundle.path, "utf-8");
 
     if (code.includes("delete-conversation")) {
       console.log(`  [ok] ${relPath(bundle.path)}: delete button already patched`);
+      platforms.add(bundle.platform);
       continue;
     }
 
@@ -292,6 +329,7 @@ function patchDataControls(bundles, isCheck) {
         `  [?] ${relPath(bundle.path)}: would inject delete button` +
         ` (thread=${threadVar} host=${hostIdVar} qc=${queryClientVar} btn=${btnComponent})`,
       );
+      platforms.add(bundle.platform);
       patched++;
       continue;
     }
@@ -301,9 +339,10 @@ function patchDataControls(bundles, isCheck) {
       `  [ok] ${relPath(bundle.path)}: injected delete button` +
       ` (thread=${threadVar} host=${hostIdVar} qc=${queryClientVar} btn=${btnComponent})`,
     );
+    platforms.add(bundle.platform);
     patched++;
   }
-  return patched;
+  return { total: patched, platforms };
 }
 
 // ─── Main ───────────────────────────────────────────────────────
@@ -315,19 +354,30 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  const dataControlsBundles = locateBundles({
-    dir: "assets",
-    pattern: /^data-controls-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  });
-  const nativeBundles = dataControlsBundles.filter((bundle) =>
-    hasNativeArchiveDelete(fs.readFileSync(bundle.path, "utf-8")),
-  );
+  const platforms = platform
+    ? [platform]
+    : ["mac-arm64", "mac-x64", "win"].filter((name) =>
+        fs.existsSync(path.join(SRC_DIR, name, "_asar", "webview", "assets")),
+      );
+
+  // 原生检测按内容递归扫描；注入层仍按旧文件名定位，避免命中错误 chunk。
+  const nativeBundles = findNativeBundles(platforms);
   const nativePlatforms = new Set(nativeBundles.map((bundle) => bundle.platform));
 
   for (const bundle of nativeBundles) {
     console.log(`  [ok] ${relPath(bundle.path)}: upstream provides archived conversation deletion`);
   }
+
+  if (platforms.length > 0 && nativePlatforms.size === platforms.length) {
+    console.log(`  [done] native: ${nativeBundles.length}, routes: 0, buttons: 0`);
+    return;
+  }
+
+  const dataControlsBundles = locateBundles({
+    dir: "assets",
+    pattern: /^data-controls-.*\.js$/,
+    ...(platform ? { platform } : {}),
+  });
 
   console.log("  [layer 1] app-main: delete-conversation route");
   const appMainBundles = locateBundles({
@@ -335,22 +385,33 @@ function main() {
     pattern: /^app-main-.*\.js$/,
     ...(platform ? { platform } : {}),
   });
-  const routePatched = patchAppMain(
+  const routeResult = patchAppMain(
     appMainBundles.filter((bundle) => !nativePlatforms.has(bundle.platform)),
     isCheck,
   );
 
   console.log("  [layer 2] data-controls: delete button");
-  const btnPatched = patchDataControls(
+  const btnResult = patchDataControls(
     dataControlsBundles.filter((bundle) => !nativePlatforms.has(bundle.platform)),
     isCheck,
   );
 
+  // 非原生平台必须同时具备路由与按钮注入结果；缺任何一层都不能静默成功。
+  let incomplete = 0;
+  for (const name of platforms) {
+    if (nativePlatforms.has(name)) continue;
+    if (!routeResult.platforms.has(name) || !btnResult.platforms.has(name)) {
+      console.log(`  [x] ${name}: 非原生平台未注入完整删除入口`);
+      incomplete++;
+    }
+  }
+
   console.log(
-    `  [done] native: ${nativeBundles.length}, routes: ${routePatched}, buttons: ${btnPatched}`,
+    `  [done] native: ${nativeBundles.length}, routes: ${routeResult.total}, buttons: ${btnResult.total}`,
   );
+  if (incomplete > 0) process.exitCode = 1;
 }
 
 if (require.main === module) main();
 
-module.exports = { hasNativeArchiveDelete, patchAppMain, patchDataControls };
+module.exports = { hasNativeArchiveDelete, findNativeBundles, patchAppMain, patchDataControls };

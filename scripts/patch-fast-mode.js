@@ -14,7 +14,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { locateBundles, relPath, SRC_DIR } = require("./patch-util");
+const { listJavaScriptFiles, relPath, SRC_DIR } = require("./patch-util");
 
 function walk(node, visitor, parent = null) {
   if (!node || typeof node !== "object") return;
@@ -215,10 +215,9 @@ function main() {
   const targets = [];
   for (const plat of platforms) {
     const assetsDir = path.join(SRC_DIR, plat, "_asar", "webview", "assets");
-    if (!fs.existsSync(assetsDir)) continue;
-    for (const f of fs.readdirSync(assetsDir)) {
-      if (!f.endsWith(".js")) continue;
-      const fp = path.join(assetsDir, f);
+    // 递归扫描 assets，兼容上游把界面 chunk 移入 async 目录。
+    for (const file of listJavaScriptFiles(assetsDir)) {
+      const fp = path.join(assetsDir, file);
       const src = fs.readFileSync(fp, "utf-8");
       if (src.includes("chatgpt") && isFastModeFunction(src)) {
         targets.push({ platform: plat, path: fp });

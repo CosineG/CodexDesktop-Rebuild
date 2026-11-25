@@ -8,6 +8,7 @@ const { parse } = require("smol-toml");
 
 const {
   patchSource,
+  locateTargets,
   RUNTIME_FILENAME,
   RUNTIME_REQUIRE,
   syncRuntimeFiles,
@@ -61,6 +62,46 @@ test("app-server 参数工厂只补两处基础参数展开", () => {
 test("未知上游参数结构会明确失败", () => {
   const source = createBundle().replace("...base,...e", "...e");
   assert.equal(patchSource(source).status, "unexpected-spread-count");
+});
+
+test("重复出现的 app-server 参数 bundle 全部定位并补丁", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-imagegen-build-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const buildDir = path.join(root, "win", "_asar", ".vite", "build");
+  fs.mkdirSync(buildDir, { recursive: true });
+  fs.writeFileSync(path.join(buildDir, "app-server-host.js"), createBundle());
+  fs.writeFileSync(
+    path.join(buildDir, "early-bootstrap-824-x.js"),
+    createBundle(),
+  );
+  fs.writeFileSync(path.join(buildDir, "unrelated.js"), "console.log(1);");
+
+  const targets = locateTargets("win", root);
+
+  assert.deepEqual(
+    targets.map((target) => path.basename(target.path)).sort(),
+    ["app-server-host.js", "early-bootstrap-824-x.js"],
+  );
+  assert.equal(new Set(targets.map((target) => target.buildDir)).size, 1);
+  for (const target of targets) {
+    assert.equal(
+      patchSource(fs.readFileSync(target.path, "utf8")).status,
+      "patched",
+    );
+  }
+});
+
+test("平台有 build 目录但零命中时明确报错", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-imagegen-build-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const buildDir = path.join(root, "win", "_asar", ".vite", "build");
+  fs.mkdirSync(buildDir, { recursive: true });
+  fs.writeFileSync(path.join(buildDir, "unrelated.js"), "console.log(1);");
+
+  assert.throws(
+    () => locateTargets("win", root),
+    /no app-server argument bundle found/,
+  );
 });
 
 test("自定义 base_url 的 API key 通过环境传递并启用受限能力", (t) => {

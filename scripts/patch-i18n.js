@@ -7,7 +7,7 @@
  * AST match: any .get("enable_i18n", <default>) call expression
  * (optionally wrapped in ChainExpression for ?.get), replaced with !0.
  *
- * Target files: any chunk containing "enable_i18n" (index-*.js, general-settings-*.js, app-main-*.js)
+ * Target files: 递归扫描 webview/assets（含 async 分片），只处理源码含 "enable_i18n" 的 chunk。
  *
  * Usage:
  *   node scripts/patch-i18n.js [platform]   # Apply (mac-arm64/mac-x64/win/omit=all)
@@ -16,7 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { locateBundles, relPath, SRC_DIR } = require("./patch-util");
+const { listJavaScriptFiles, relPath, SRC_DIR } = require("./patch-util");
 
 // ──────────────────────────────────────────────
 //  AST walker
@@ -42,6 +42,8 @@ function walk(node, visitor) {
 // ──────────────────────────────────────────────
 
 const FIELD_NAME = "enable_i18n";
+// 替换值自带标记：重复执行时才能区分“本补丁已启用”和“上游已移除闸门”。
+const PATCH_MARKER = "!0/*codex-i18n-enabled*/";
 
 /**
  * Find CallExpression (possibly wrapped in ChainExpression):
@@ -93,7 +95,7 @@ function collectPatches(ast, source) {
 
     // Already patched?
     const exprSrc = source.slice(replaceNode.start, replaceNode.end);
-    if (exprSrc === "!0") return;
+    if (exprSrc === "!0" || exprSrc === PATCH_MARKER) return;
 
     // Dedup
     if (seen.has(replaceNode.start)) return;
@@ -102,7 +104,7 @@ function collectPatches(ast, source) {
     patches.push({
       start: replaceNode.start,
       end: replaceNode.end,
-      replacement: "!0",
+      replacement: PATCH_MARKER,
       original: exprSrc,
     });
   });
@@ -114,33 +116,24 @@ function collectPatches(ast, source) {
 //  Bundle location: scan all JS chunks for enable_i18n
 // ──────────────────────────────────────────────
 
-function locateTargets(platform) {
+function locateTargets(platform, { srcDir = SRC_DIR } = {}) {
+  const assetsFor = (plat) => path.join(srcDir, plat, "_asar", "webview", "assets");
   const platforms = platform
     ? [platform]
-    : ["mac-arm64", "mac-x64", "win"].filter((p) =>
-        fs.existsSync(path.join(SRC_DIR, p, "_asar", "webview", "assets"))
-      );
+    : ["mac-arm64", "mac-x64", "win"].filter((p) => fs.existsSync(assetsFor(p)));
 
   const targets = [];
   for (const plat of platforms) {
-    // Check index-*.js
-    const indexBundles = locateBundles({ dir: "assets", pattern: /^index-.*\.js$/, platform: plat });
-    for (const b of indexBundles) {
-      const src = fs.readFileSync(b.path, "utf-8");
-      if (src.includes(FIELD_NAME)) {
-        targets.push(b);
-      }
-    }
-
-    // Check other chunks (general-settings-*.js, app-main-*.js, etc.)
-    const assetsDir = path.join(SRC_DIR, plat, "_asar", "webview", "assets");
-    if (!fs.existsSync(assetsDir)) continue;
-    for (const f of fs.readdirSync(assetsDir)) {
-      if (!f.endsWith(".js") || f.startsWith("index-")) continue;
-      const fp = path.join(assetsDir, f);
-      const src = fs.readFileSync(fp, "utf-8");
-      if (src.includes(FIELD_NAME)) {
-        targets.push({ platform: plat, path: fp });
+    const assetsDir = assetsFor(plat);
+    for (const file of listJavaScriptFiles(assetsDir)) {
+      const filePath = path.join(assetsDir, file);
+      const source = fs.readFileSync(filePath, "utf-8");
+      if (source.includes(FIELD_NAME)) {
+        // 仍有闸门调用，需要（继续）补丁。
+        targets.push({ platform: plat, path: filePath, patched: false });
+      } else if (source.includes(PATCH_MARKER)) {
+        // 闸门字符串已消失但留下补丁标记：说明此前已启用，而不是上游移除。
+        targets.push({ platform: plat, path: filePath, patched: true });
       }
     }
   }
@@ -168,6 +161,10 @@ function main() {
 
   for (const bundle of targets) {
     console.log(`\n-- [${bundle.platform}] ${relPath(bundle.path)}`);
+    if (bundle.patched) {
+      console.log("   [ok] i18n gate already enabled");
+      continue;
+    }
     const source = fs.readFileSync(bundle.path, "utf-8");
     console.log(`   size: ${(source.length / 1024 / 1024).toFixed(1)} MB`);
 
@@ -208,4 +205,6 @@ function main() {
   }
 }
 
-main();
+module.exports = { PATCH_MARKER, main, locateTargets, collectPatches };
+
+if (require.main === module) main();
